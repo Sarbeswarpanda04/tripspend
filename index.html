@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#5b93f7" />
+<title>TripSpend — Trip Expense Manager</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icon.svg" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="TripSpend" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+<!-- Google sign-in gate -->
+<div id="login">
+  <img class="logo" src="icon.svg" alt="TripSpend" />
+  <h1>TripSpend</h1>
+  <p>Track every trip expense, split costs with friends and stay on budget — synced to your Google account.</p>
+  <div class="feats">
+    <div><i class="fa-solid fa-chart-pie"></i>Analyse</div>
+    <div><i class="fa-solid fa-users"></i>Split</div>
+    <div><i class="fa-solid fa-cloud"></i>Synced</div>
+  </div>
+  <button class="gbtn" id="googleBtn">
+    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="" />
+    Continue with Google
+  </button>
+  <div class="fine" id="loginMsg">Your data is private to your account.</div>
+</div>
+
+<!-- Main app -->
+<div id="app" style="display:none">
+  <div class="header" id="header">
+    <button class="back" id="backBtn" aria-label="Back"><i class="fa-solid fa-chevron-left"></i></button>
+    <div>
+      <h1 id="hTitle">TripSpend</h1>
+      <div class="sub" id="hSub">Manage your trip expenses</div>
+    </div>
+    <div class="spacer"></div>
+    <button class="hbtn" id="themeBtn" aria-label="Toggle theme"><i class="fa-solid fa-moon"></i></button>
+    <img class="avatar" id="avatarBtn" alt="Account" />
+  </div>
+
+  <div class="screen active" id="s-trips"></div>
+  <div class="screen" id="s-expenses"></div>
+  <div class="screen" id="s-analysis"></div>
+  <div class="screen" id="s-budget"></div>
+
+  <nav class="nav" id="nav">
+    <button data-tab="trips" class="active"><span class="ic"><i class="fa-solid fa-suitcase-rolling"></i></span>Trips</button>
+    <button data-tab="expenses"><span class="ic"><i class="fa-solid fa-receipt"></i></span>Expenses</button>
+    <button class="fab" id="addBtn"><span class="ic"><i class="fa-solid fa-plus"></i></span></button>
+    <button data-tab="analysis"><span class="ic"><i class="fa-solid fa-chart-pie"></i></span>Analysis</button>
+    <button data-tab="budget"><span class="ic"><i class="fa-solid fa-wallet"></i></span>Budget</button>
+  </nav>
+
+  <div class="overlay" id="overlay"><div class="sheet" id="sheet"></div></div>
+  <div class="toast" id="toast"></div>
+  <div id="splash"><div class="spinner"></div></div>
+</div>
+
+<!-- Firebase (compat build → shared globals) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+<script src="js/firebase-config.js"></script>
+<script src="js/store.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "TripSpend — Trip Expense Manager",
+  "short_name": "TripSpend",
+  "description": "Create trips, track expenses by category, set budgets, split costs and see analysis — synced to your Google account.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef3fc",
+  "theme_color": "#5b93f7",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
