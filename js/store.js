@@ -129,7 +129,7 @@ const Store = (() => {
         doc=>emit('cats',doc.exists?(doc.data().list||[]):[]),
         error=>emit('error',error)));
       unsub.push(db.collection('userDirectory').doc(uid).onSnapshot(
-        doc=>emit('discoverable',doc.exists),
+        doc=>emit('discoverable',doc.exists?doc.data():null),
         error=>emit('error',error)));
       unsub.push(db.collection('collaborationInvites')
         .where('inviteeUid','==',uid).limit(20).onSnapshot(
@@ -244,7 +244,9 @@ const Store = (() => {
           ownerUid,
           tripId,
           inviteId,
-          joinedAt:firebase.firestore.FieldValue.serverTimestamp()
+          joinedAt:firebase.firestore.FieldValue.serverTimestamp(),
+          displayName:firebase.auth().currentUser?.displayName||'Trip traveler',
+          photoURL:firebase.auth().currentUser?.photoURL||null
         };
         if(!memberDoc.exists) transaction.set(memberRef,{uid,...membership});
         if(!joinedDoc.exists) transaction.set(joinedRef,membership);
@@ -252,7 +254,7 @@ const Store = (() => {
       });
     },
 
-    setDiscoverable(discoverable, displayName) {
+    setDiscoverable(discoverable, displayName, photoURL) {
       const profileRef=db.collection('userDirectory').doc(uid);
       if(!discoverable) return profileRef.delete();
       const name=(displayName||'').trim();
@@ -261,6 +263,7 @@ const Store = (() => {
         uid,
         displayName:name,
         searchName:name.toLocaleLowerCase(),
+        photoURL:photoURL||null,
         updatedAt:firebase.firestore.FieldValue.serverTimestamp()
       });
     },
@@ -334,7 +337,9 @@ const Store = (() => {
           ownerUid:invite.ownerUid,
           tripId:invite.tripId,
           inviteId,
-          joinedAt:firebase.firestore.FieldValue.serverTimestamp()
+          joinedAt:firebase.firestore.FieldValue.serverTimestamp(),
+          displayName:firebase.auth().currentUser?.displayName||'Trip traveler',
+          photoURL:firebase.auth().currentUser?.photoURL||null
         };
         transaction.update(inviteRef,{
           status:'accepted',
@@ -343,6 +348,29 @@ const Store = (() => {
         transaction.set(memberRef,{uid,...membership});
         transaction.set(joinedRef,membership);
         return {ownerUid:invite.ownerUid,tripId:invite.tripId,tripName:invite.tripName};
+      });
+    },
+
+    getTripMembers(ownerUid, tripId) {
+      return shareMembers(ownerUid,tripId).get()
+        .then(snapshot=>snapshot.docs.map(doc=>({uid:doc.id,...doc.data()})));
+    },
+
+    removeTripMember(ownerUid, tripId, memberUid) {
+      const memberRef=shareMembers(ownerUid,tripId).doc(memberUid);
+      const joinedRef=ownerUser(memberUid).collection('joinedTrips').doc(shareKey(ownerUid,tripId));
+      const inviteRef=db.collection('collaborationInvites').doc(`${ownerUid}_${tripId}_${memberUid}`);
+      return db.runTransaction(async transaction=>{
+        const [memberDoc,joinedDoc,inviteDoc]=await Promise.all([
+          transaction.get(memberRef),
+          transaction.get(joinedRef),
+          transaction.get(inviteRef)
+        ]);
+        if(!memberDoc.exists || !joinedDoc.exists) return false;
+        transaction.delete(memberRef);
+        transaction.delete(joinedRef);
+        if(inviteDoc.exists) transaction.delete(inviteRef);
+        return true;
       });
     },
 

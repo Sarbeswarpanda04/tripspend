@@ -86,7 +86,13 @@ function onStoreData(kind, data){
   } else if(kind==='cats'){
     customCats = data;
   } else if(kind==='discoverable'){
-    discoverable = data;
+    discoverable = !!data;
+    const displayName=currentUser?.displayName;
+    const photoURL=currentUser?.photoURL||null;
+    if(data && displayName &&
+      (data.displayName!==displayName || (data.photoURL||null)!==photoURL)){
+      Store.setDiscoverable(true,displayName,photoURL).catch(handleErr);
+    }
   } else if(kind==='collaborationInvites'){
     collaborationInvites = data;
   } else if(kind==='ready'){
@@ -605,6 +611,8 @@ function openInviteSheet(id){
   const link=trip.inviteId?inviteUrl(trip.inviteId):'';
   openSheet(`<h2>Invite collaborators</h2>
     <p class="small muted" style="margin-bottom:16px">Invite a TripSpend user by display name, or share a link. Users must accept before they can access this trip.</p>
+    <div class="field"><label>Collaborators</label>
+      <div id="tripCollaborators" class="small muted">Loading collaborators…</div></div>
     <div class="field"><label>Find a user</label>
       <input id="collaboratorSearch" type="search" placeholder="Type at least 2 characters" oninput="searchCollaborators('${id}',this.value)">
       <div id="collaboratorResults" class="small muted" style="margin-top:10px">Only users who opted into discovery appear here.</div></div>
@@ -613,6 +621,52 @@ function openInviteSheet(id){
       <button class="btn danger" style="margin-top:10px" onclick="revokeTripInvite('${id}')">Revoke invite link</button>`
       :`<button class="btn" onclick="createTripInvite('${id}')">${icon('fa-solid fa-link')} Create invite link</button>`}
     <button class="btn ghost" style="margin-top:10px" onclick="closeSheet()">Done</button>`);
+  loadTripCollaborators(id);
+}
+async function loadTripCollaborators(tripId){
+  const run=collaboratorSearchRun;
+  const box=document.getElementById('tripCollaborators');
+  if(!box) return;
+  try{
+    const members=await Store.getTripMembers(currentUser.uid,tripId);
+    if(run!==collaboratorSearchRun) return;
+    if(!members.length){
+      box.className='small muted';
+      box.textContent='No collaborators have joined yet.';
+      return;
+    }
+    box.className='';
+    box.innerHTML=members.map(member=>`<div class="row between" style="gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">
+      <div class="row" style="gap:9px;min-width:0">
+        <img class="collaborator-avatar" src="${esc(member.photoURL||initialAvatar(member.displayName||'Traveler'))}" alt="">
+        <span style="font-weight:650">${esc(member.displayName||'Trip traveler')}</span></div>
+      <button class="btn sm ghost" data-remove-uid="${esc(member.uid)}">Remove</button></div>`).join('');
+    box.querySelectorAll('[data-remove-uid]').forEach(button=>button.addEventListener('click',()=>
+      removeTripCollaborator(tripId,button.dataset.removeUid,button)));
+  } catch(err){
+    if(run!==collaboratorSearchRun) return;
+    console.error('Collaborator list error:',err);
+    box.className='small muted';
+    box.textContent='Could not load collaborators.';
+  }
+}
+async function removeTripCollaborator(tripId,memberUid,button){
+  const trip=getTrip(tripId);
+  if(!trip || trip.ownerUid!==currentUser?.uid || !button) return;
+  if(!confirm('Remove this collaborator from the trip? They will immediately lose access.')) return;
+  button.disabled=true;
+  button.textContent='Removing…';
+  try{
+    const removed=await Store.removeTripMember(trip.ownerUid,trip.id,memberUid);
+    if(!removed) throw new Error('This collaborator is no longer a member.');
+    toast('Collaborator removed');
+    loadTripCollaborators(tripId);
+  } catch(err){
+    console.error('Collaborator removal error:',err);
+    button.disabled=false;
+    button.textContent='Remove';
+    toast(err.message||'Could not remove collaborator');
+  }
 }
 function searchCollaborators(tripId,term){
   clearTimeout(collaboratorSearchTimer);
@@ -634,7 +688,9 @@ function searchCollaborators(tripId,term){
       if(!users.length){ box.textContent='No available users found.'; return; }
       box.className='';
       box.innerHTML=users.map(user=>`<div class="row between" style="gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">
-        <span style="font-weight:650">${esc(user.displayName)}</span>
+        <div class="row" style="gap:9px;min-width:0">
+          <img class="collaborator-avatar" src="${esc(user.photoURL||initialAvatar(user.displayName||'Traveler'))}" alt="">
+          <span style="font-weight:650">${esc(user.displayName)}</span></div>
         <button class="btn sm ghost" data-invite-uid="${esc(user.uid)}">Invite</button></div>`).join('');
       box.querySelectorAll('[data-invite-uid]').forEach(button=>button.addEventListener('click',()=>
         sendCollaborationInvite(tripId,button.dataset.inviteUid,button)));
@@ -978,7 +1034,7 @@ function installApp(){ if(!deferredPrompt) return; deferredPrompt.prompt();
 async function toggleDiscoverable(){
   const next=!discoverable;
   try{
-    await Store.setDiscoverable(next,currentUser?.displayName);
+    await Store.setDiscoverable(next,currentUser?.displayName,currentUser?.photoURL);
     discoverable=next;
     openSettings();
     toast(next?'Your profile is searchable':'Your profile was removed from search');
