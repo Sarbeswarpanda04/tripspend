@@ -60,6 +60,9 @@ rules_version = '2';
 // Helper Functions
 // ===============================================================
 
+service cloud.firestore {
+  match /databases/{database}/documents {
+
 function signedIn() {
   return request.auth != null;
 }
@@ -487,8 +490,6 @@ function validCollaborationInviteAcceptance(inviteId) {
 // Database Rules — default deny
 // ===============================================================
 
-service cloud.firestore {
-  match /databases/{database}/documents {
     match /userDirectory/{userId} {
       // Directory records contain only opted-in public display names.
       allow get: if signedIn();
