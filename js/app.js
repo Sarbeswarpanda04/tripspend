@@ -32,6 +32,10 @@ let currencyMigrationStarted = false;
 let storeReady = false;
 let inviteJoinInProgress = false;
 let pendingJoinedTripId = null;
+let discoverable = false;
+let collaborationInvites = [];
+let collaboratorSearchTimer = null;
+let collaboratorSearchRun = 0;
 let pendingInviteId = new URLSearchParams(window.location.search).get('invite');
 
 const uid = ()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
@@ -81,6 +85,10 @@ function onStoreData(kind, data){
     }
   } else if(kind==='cats'){
     customCats = data;
+  } else if(kind==='discoverable'){
+    discoverable = data;
+  } else if(kind==='collaborationInvites'){
+    collaborationInvites = data;
   } else if(kind==='ready'){
     storeReady=true;
     hideSplash();
@@ -202,6 +210,8 @@ auth.onAuthStateChanged(user=>{
     currentUser=null;
     storeReady=false;
     currencyMigrationStarted=false;
+    discoverable=false;
+    collaborationInvites=[];
     Store.stop();
     trips=[]; expenses=[]; customCats=[]; activeTripId=null;
     pendingJoinedTripId=null;
@@ -315,14 +325,24 @@ function renderNoTrip(tab){
 /* ---- TRIPS screen ---- */
 function renderTrips(){
   const el = document.getElementById('s-trips');
+  const inviteInbox = collaborationInvites.length
+    ? `<div class="section-title">Trip invitations</div>${collaborationInvites.map(invite=>`
+        <div class="card">
+          <div class="row between" style="gap:12px">
+            <div style="min-width:0"><strong>${esc(invite.tripName)}</strong>
+              <div class="small muted" style="margin-top:4px">${esc(invite.ownerName)} invited you to collaborate</div></div>
+            <button class="btn sm" onclick="acceptCollaborationInvite('${esc(invite.id)}')">Accept</button>
+          </div>
+        </div>`).join('')}`
+    : '';
   if(!trips.length){
-    el.innerHTML = `<div class="empty"><div class="em"><i class="fa-solid fa-suitcase-rolling"></i></div><h3>No trips yet</h3>
+    el.innerHTML = inviteInbox + `<div class="empty"><div class="em"><i class="fa-solid fa-suitcase-rolling"></i></div><h3>No trips yet</h3>
       <p>Create your first trip to start tracking where your money goes.</p>
       <div style="margin-top:20px"><button class="btn" style="max-width:230px;margin:0 auto" onclick="openTripSheet()">${icon('fa-solid fa-plus')} Create trip</button></div></div>`;
     return;
   }
   const grand = grandTotal();
-  let h = `<div class="grand"><div class="row between">
+  let h = inviteInbox + `<div class="grand"><div class="row between">
       <div><div class="lbl">Total across all trips</div>
         <div class="val">₹${fmtNum(grand)}</div></div>
       <div style="text-align:right"><div class="lbl">in INR</div>
@@ -343,7 +363,7 @@ function renderTrips(){
       <span class="accent"></span>
       <div class="row between"><h3>${esc(t.name)}</h3>
         <div class="row">${t.ownerUid===currentUser?.uid?`<button class="link" onclick="openInviteFromCard(event,'${t.id}')">Invite</button>`:''}
-        <span class="pill">₹ INR</span></div></div>
+        ${t.ownerUid!==currentUser?.uid?'<span class="pill">Shared</span>':''}<span class="pill">₹ INR</span></div></div>
       ${d? `<div class="small muted" style="padding-left:8px;margin-top:3px">
         <i class="fa-regular fa-calendar"></i> ${shortDate(t.startDate)} – ${shortDate(t.endDate)}
         · ${d.status==='upcoming'?'upcoming':d.status==='ended'?'ended':d.left+' day'+(d.left!==1?'s':'')+' left'}</div>`:''}
@@ -552,7 +572,7 @@ function renderBudget(){
   h += `<button class="btn ghost" onclick="openBudgetSheet()">${b?'Edit budget':'Set a budget'}</button>
     ${t.ownerUid===currentUser?.uid?`<button class="btn ghost" style="margin-top:12px" onclick="openInviteSheet('${t.id}')">${icon('fa-solid fa-user-plus')} Invite collaborators</button>`:''}
     <button class="btn ghost" style="margin-top:12px" onclick="openTripSheet('${t.id}')">${icon('fa-solid fa-pen')} Edit trip details</button>
-    <button class="btn danger" style="margin-top:12px" onclick="confirmDeleteTrip('${t.id}')">${icon('fa-solid fa-trash-can')} Delete this trip</button>`;
+    ${t.ownerUid===currentUser?.uid?`<button class="btn danger" style="margin-top:12px" onclick="confirmDeleteTrip('${t.id}')">${icon('fa-solid fa-trash-can')} Delete this trip</button>`:''}`;
   el.innerHTML = h;
 }
 /* ============ Sheets / modals ============ */
@@ -580,14 +600,88 @@ function openInviteSheet(id){
     toast('Only the trip owner can create or manage invite links');
     return;
   }
+  collaboratorSearchRun++;
+  clearTimeout(collaboratorSearchTimer);
   const link=trip.inviteId?inviteUrl(trip.inviteId):'';
   openSheet(`<h2>Invite collaborators</h2>
-    <p class="small muted" style="margin-bottom:16px">Anyone with this link can join this trip and collaborate on its details and expenses.</p>
+    <p class="small muted" style="margin-bottom:16px">Invite a TripSpend user by display name, or share a link. Users must accept before they can access this trip.</p>
+    <div class="field"><label>Find a user</label>
+      <input id="collaboratorSearch" type="search" placeholder="Type at least 2 characters" oninput="searchCollaborators('${id}',this.value)">
+      <div id="collaboratorResults" class="small muted" style="margin-top:10px">Only users who opted into discovery appear here.</div></div>
     ${link?`<div class="field"><label>Invite link</label><input id="inviteUrl" readonly value="${esc(link)}"></div>
       <button class="btn" onclick="shareInviteLink('${id}')">${icon('fa-solid fa-link')} Share invite link</button>
       <button class="btn danger" style="margin-top:10px" onclick="revokeTripInvite('${id}')">Revoke invite link</button>`
       :`<button class="btn" onclick="createTripInvite('${id}')">${icon('fa-solid fa-link')} Create invite link</button>`}
     <button class="btn ghost" style="margin-top:10px" onclick="closeSheet()">Done</button>`);
+}
+function searchCollaborators(tripId,term){
+  clearTimeout(collaboratorSearchTimer);
+  const run=++collaboratorSearchRun;
+  const box=document.getElementById('collaboratorResults');
+  if(!box) return;
+  const prefix=(term||'').trim();
+  if(prefix.length<2){
+    box.className='small muted';
+    box.textContent='Type at least 2 characters to search opted-in users.';
+    return;
+  }
+  box.className='small muted';
+  box.textContent='Searching…';
+  collaboratorSearchTimer=setTimeout(async()=>{
+    try{
+      const users=await Store.searchUsers(prefix);
+      if(run!==collaboratorSearchRun) return;
+      if(!users.length){ box.textContent='No available users found.'; return; }
+      box.className='';
+      box.innerHTML=users.map(user=>`<div class="row between" style="gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">
+        <span style="font-weight:650">${esc(user.displayName)}</span>
+        <button class="btn sm ghost" data-invite-uid="${esc(user.uid)}">Invite</button></div>`).join('');
+      box.querySelectorAll('[data-invite-uid]').forEach(button=>button.addEventListener('click',()=>
+        sendCollaborationInvite(tripId,button.dataset.inviteUid,button)));
+    } catch(err){
+      if(run!==collaboratorSearchRun) return;
+      console.error('Collaborator search error:',err);
+      box.textContent='Could not search users. Check Firebase access.';
+    }
+  },250);
+}
+async function sendCollaborationInvite(tripId,inviteeUid,button){
+  const trip=getTrip(tripId);
+  if(!trip || trip.ownerUid!==currentUser?.uid || !button) return;
+  button.disabled=true;
+  button.textContent='Sending…';
+  try{
+    const result=await Store.sendCollaborationInvite(trip,inviteeUid,currentUser.displayName);
+    button.textContent=result.alreadyMember?'Already added':result.alreadyInvited?'Pending':'Sent';
+    if(result.alreadyMember) toast('This user already has trip access');
+    else if(result.alreadyInvited) toast('Invite already pending');
+    else toast('Collaboration invite sent');
+  } catch(err){
+    console.error('Collaboration invite error:',err);
+    button.disabled=false;
+    button.textContent='Invite';
+    toast(err.message||'Could not send invite');
+  }
+}
+async function acceptCollaborationInvite(inviteId){
+  try{
+    const result=await Store.acceptCollaborationInvite(inviteId);
+    if(result.alreadyMember){
+      toast('You already have access to this trip');
+      return;
+    }
+    pendingJoinedTripId=result.tripId;
+    activeTripId=result.tripId;
+    Store.saveSettings({activeTripId}).catch(handleErr);
+    if(getTrip(result.tripId)){
+      pendingJoinedTripId=null;
+      setTab('expenses');
+    }
+    toast(`Joined ${result.tripName}`);
+  } catch(err){
+    console.error('Collaboration invite acceptance error:',err);
+    toast(err.message||'Could not accept collaboration invite');
+  }
 }
 async function createTripInvite(id){
   const trip=getTrip(id);
@@ -862,6 +956,19 @@ function installBtnHtml(){
 function installApp(){ if(!deferredPrompt) return; deferredPrompt.prompt();
   deferredPrompt.userChoice.finally(()=>{ deferredPrompt=null; closeSheet(); }); }
 
+async function toggleDiscoverable(){
+  const next=!discoverable;
+  try{
+    await Store.setDiscoverable(next,currentUser?.displayName);
+    discoverable=next;
+    openSettings();
+    toast(next?'Your profile is searchable':'Your profile was removed from search');
+  } catch(err){
+    console.error('Profile discovery update error:',err);
+    toast(err.message||'Could not update profile search settings');
+  }
+}
+
 function openSettings(){
   const u=currentUser||{};
   const catList = customCats.length? customCats.map(c=>`<div class="row between" style="margin-bottom:8px">
@@ -878,6 +985,9 @@ function openSettings(){
     </div>
     <div class="field"><label>Appearance</label>
       <button class="btn ghost" onclick="toggleTheme()">${settings.theme==='dark'?icon('fa-solid fa-sun')+' Switch to light':icon('fa-solid fa-moon')+' Switch to dark'}</button></div>
+    <div class="field"><label>Collaboration search</label>
+      <button class="btn ghost" onclick="toggleDiscoverable()">${discoverable?icon('fa-solid fa-eye-slash')+' Remove my name from search':icon('fa-solid fa-magnifying-glass')+' Make my name searchable'}</button>
+      <div class="small muted" style="margin-top:8px">Only your Google display name is searchable. Your email and trip data stay private.</div></div>
     ${installBtnHtml()}
     <div class="field"><label>Currency</label><div class="pill">₹ INR</div></div>
     <div class="field"><label>Custom categories</label>${catList}

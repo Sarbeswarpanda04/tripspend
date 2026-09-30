@@ -128,6 +128,15 @@ const Store = (() => {
       unsub.push(U().collection('meta').doc('cats').onSnapshot(
         doc=>emit('cats',doc.exists?(doc.data().list||[]):[]),
         error=>emit('error',error)));
+      unsub.push(db.collection('userDirectory').doc(uid).onSnapshot(
+        doc=>emit('discoverable',doc.exists),
+        error=>emit('error',error)));
+      unsub.push(db.collection('collaborationInvites')
+        .where('inviteeUid','==',uid).limit(20).onSnapshot(
+          snapshot=>emit('collaborationInvites',snapshot.docs
+            .map(doc=>({id:doc.id,...doc.data()}))
+            .filter(invite=>invite.status==='pending')),
+          error=>emit('error',error)));
       joinedUnsub.push(U().collection('joinedTrips').onSnapshot(
         watchJoinedTrips,
         error=>emit('error',error)));
@@ -161,13 +170,18 @@ const Store = (() => {
 
     deleteTripCascade(id,expIds,ownerUid=uid,inviteId=null) {
       const owner=ownerUser(ownerUid);
-      const batch=db.batch();
-      batch.delete(owner.collection('trips').doc(id));
-      expIds.forEach(expenseId=>batch.delete(owner.collection('expenses').doc(expenseId)));
-      if(inviteId && ownerUid===uid){
-        batch.delete(db.collection('tripInvites').doc(inviteId));
-      }
-      return batch.commit();
+      return db.collection('collaborationInvites')
+        .where('ownerUid','==',ownerUid).limit(450).get()
+        .then(snapshot=>{
+          const batch=db.batch();
+          batch.delete(owner.collection('trips').doc(id));
+          expIds.forEach(expenseId=>batch.delete(owner.collection('expenses').doc(expenseId)));
+          snapshot.docs.filter(doc=>doc.data().tripId===id).forEach(doc=>batch.delete(doc.ref));
+          if(inviteId && ownerUid===uid){
+            batch.delete(db.collection('tripInvites').doc(inviteId));
+          }
+          return batch.commit();
+        });
     },
 
     createTripInvite(trip) {
@@ -235,6 +249,100 @@ const Store = (() => {
         if(!memberDoc.exists) transaction.set(memberRef,{uid,...membership});
         if(!joinedDoc.exists) transaction.set(joinedRef,membership);
         return {ownerUid,tripId,tripName:invite.tripName};
+      });
+    },
+
+    setDiscoverable(discoverable, displayName) {
+      const profileRef=db.collection('userDirectory').doc(uid);
+      if(!discoverable) return profileRef.delete();
+      const name=(displayName||'').trim();
+      if(!name) return Promise.reject(new Error('Your Google profile needs a display name to be searchable.'));
+      return profileRef.set({
+        uid,
+        displayName:name,
+        searchName:name.toLocaleLowerCase(),
+        updatedAt:firebase.firestore.FieldValue.serverTimestamp()
+      });
+    },
+
+    searchUsers(term) {
+      const prefix=(term||'').trim().toLocaleLowerCase();
+      if(prefix.length<2) return Promise.resolve([]);
+      return db.collection('userDirectory')
+        .orderBy('searchName')
+        .startAt(prefix)
+        .endAt(prefix+'\uf8ff')
+        .limit(10)
+        .get()
+        .then(snapshot=>snapshot.docs
+          .map(doc=>doc.data())
+          .filter(profile=>profile.uid!==uid));
+    },
+
+    sendCollaborationInvite(trip, inviteeUid, ownerName) {
+      const inviteRef=db.collection('collaborationInvites')
+        .doc(`${uid}_${trip.id}_${inviteeUid}`);
+      const profileRef=db.collection('userDirectory').doc(inviteeUid);
+      const memberRef=shareMembers(uid,trip.id).doc(inviteeUid);
+      return db.runTransaction(async transaction=>{
+        const [profileDoc,memberDoc,inviteDoc]=await Promise.all([
+          transaction.get(profileRef),
+          transaction.get(memberRef),
+          transaction.get(inviteRef)
+        ]);
+        if(memberDoc.exists) return {alreadyMember:true};
+        if(inviteDoc.exists) return {alreadyInvited:true};
+        if(!profileDoc.exists) throw new Error('This user is no longer available for collaboration.');
+        transaction.set(inviteRef,{
+          ownerUid:uid,
+          ownerName:(ownerName||'').trim(),
+          inviteeUid,
+          tripId:trip.id,
+          tripName:trip.name,
+          createdAt:firebase.firestore.FieldValue.serverTimestamp(),
+          status:'pending'
+        });
+        return {sent:true};
+      });
+    },
+
+    acceptCollaborationInvite(inviteId) {
+      const inviteRef=db.collection('collaborationInvites').doc(inviteId);
+      return db.runTransaction(async transaction=>{
+        const inviteDoc=await transaction.get(inviteRef);
+        if(!inviteDoc.exists || inviteDoc.data().status!=='pending' || inviteDoc.data().inviteeUid!==uid){
+          throw new Error('This collaboration invite is no longer available.');
+        }
+        const invite=inviteDoc.data();
+        const key=shareKey(invite.ownerUid,invite.tripId);
+        const memberRef=shareMembers(invite.ownerUid,invite.tripId).doc(uid);
+        const joinedRef=U().collection('joinedTrips').doc(key);
+        const [memberDoc,joinedDoc]=await Promise.all([
+          transaction.get(memberRef),
+          transaction.get(joinedRef)
+        ]);
+        if(memberDoc.exists || joinedDoc.exists){
+          if(memberDoc.exists && joinedDoc.exists){
+            transaction.update(inviteRef,{
+              status:'accepted',
+              respondedAt:firebase.firestore.FieldValue.serverTimestamp()
+            });
+          }
+          return {alreadyMember:true,ownerUid:invite.ownerUid,tripId:invite.tripId,tripName:invite.tripName};
+        }
+        const membership={
+          ownerUid:invite.ownerUid,
+          tripId:invite.tripId,
+          inviteId,
+          joinedAt:firebase.firestore.FieldValue.serverTimestamp()
+        };
+        transaction.update(inviteRef,{
+          status:'accepted',
+          respondedAt:firebase.firestore.FieldValue.serverTimestamp()
+        });
+        transaction.set(memberRef,{uid,...membership});
+        transaction.set(joinedRef,membership);
+        return {ownerUid:invite.ownerUid,tripId:invite.tripId,tripName:invite.tripName};
       });
     },
 
