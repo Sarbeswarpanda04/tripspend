@@ -137,23 +137,16 @@ function handleErr(err){
   }
 }
 function loginMsg(t){ const el=document.getElementById('loginMsg'); if(el) el.textContent=t; }
-async function signIn(){
-  loginMsg('Redirecting to Google sign-in…');
-  try{
-    const persistenceReady=await authPersistenceReady;
-    if(!persistenceReady){
-      loginMsg('Could not save the sign-in session. Check Firebase Auth configuration and try again.');
-      return;
-    }
-    await auth.signInWithRedirect(googleProvider);
-  } catch(err){
-    showSignInErr(err);
-  }
+function signIn(){
+  loginMsg('Opening Google sign-in…');
+  auth.signInWithPopup(googleProvider).catch(showSignInErr);
 }
 function showSignInErr(err){
   console.error('Sign-in error:', err);
   if(err.code==='auth/unauthorized-domain'){
     loginMsg('This domain isn’t authorised in Firebase Auth settings.');
+  } else if(err.code==='auth/popup-blocked'){
+    loginMsg('Your browser blocked the sign-in window. Allow pop-ups and try again.');
   } else if(err.code==='auth/popup-closed-by-user'){
     loginMsg('Sign-in cancelled. Tap to try again.');
   } else {

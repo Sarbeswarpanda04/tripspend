@@ -21,14 +21,7 @@ firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
 
-/* Keep the Firebase Auth session across reloads. This stores only the
-   authentication session; trip and expense data remain in Firestore. */
-const authPersistenceReady = auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
-  .then(()=>true)
-  .catch(err=>{
-    console.error('Firebase Auth persistence error:',err);
-    return false;
-  });
+/* Firebase Auth uses persistent browser storage by default. */
 
 const googleProvider = new firebase.auth.GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
