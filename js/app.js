@@ -705,19 +705,38 @@ async function shareInviteLink(id){
   try{
     if(navigator.share){
       await navigator.share({title:`Join ${trip.name} on TripSpend`,text:'Join this shared trip on TripSpend.',url:link});
-    } else if(navigator.clipboard){
-      await navigator.clipboard.writeText(link);
-      toast('Invite link copied');
     } else {
-      throw new Error('Clipboard is unavailable');
+      await copyInviteLink(link);
+      toast('Invite link copied');
     }
   } catch(err){
     if(err && err.name==='AbortError') return;
     console.error('Invite link share error:',err);
-    const input=document.getElementById('inviteUrl');
-    if(input) { input.focus(); input.select(); }
-    toast('Copy the invite link shown above');
+    try{
+      await copyInviteLink(link);
+      toast('Invite link copied');
+    } catch(copyErr){
+      const input=document.getElementById('inviteUrl');
+      if(input) { input.focus(); input.select(); input.setSelectionRange(0,input.value.length); }
+      toast('Link selected. Copy it to share.');
+    }
   }
+}
+async function copyInviteLink(link){
+  if(navigator.clipboard && window.isSecureContext){
+    try{
+      await navigator.clipboard.writeText(link);
+      return;
+    } catch(err){
+      console.warn('Clipboard API unavailable; trying legacy copy.',err);
+    }
+  }
+  const input=document.getElementById('inviteUrl');
+  if(!input) throw new Error('Invite link field is unavailable');
+  input.focus();
+  input.select();
+  input.setSelectionRange(0,input.value.length);
+  if(!document.execCommand('copy')) throw new Error('Browser copy command failed');
 }
 async function revokeTripInvite(id){
   const trip=getTrip(id);
