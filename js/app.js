@@ -28,9 +28,11 @@ let activeTripId = null;
 let settings = {theme:'light', homeCurrency:'INR', rates:Object.assign({}, DEF_RATES)};
 let currentTab = 'trips';
 let currentUser = null;
-let firstData = false;
-let receivedData = {trips:false, expenses:false, settings:false};
 let currencyMigrationStarted = false;
+let storeReady = false;
+let inviteJoinInProgress = false;
+let pendingJoinedTripId = null;
+let pendingInviteId = new URLSearchParams(window.location.search).get('invite');
 
 const uid = ()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const icon = cls => `<i class="${cls}"></i>`;
@@ -63,13 +65,9 @@ function onStoreData(kind, data){
   if(kind==='error'){ handleErr(data); return; }
   if(kind==='trips'){
     trips = data;
-    receivedData.trips = true;
-    if(activeTripId && !getTrip(activeTripId)) activeTripId = trips.length? null : activeTripId;
   } else if(kind==='expenses'){
     expenses = data;
-    receivedData.expenses = true;
   } else if(kind==='settings'){
-    receivedData.settings = true;
     if(data){
       if(data.theme) settings.theme = data.theme;
       settings.homeCurrency = 'INR';
@@ -83,17 +81,23 @@ function onStoreData(kind, data){
     }
   } else if(kind==='cats'){
     customCats = data;
-  }
-  normalizeCurrencyData();
-  if(!firstData && receivedData.trips && receivedData.expenses && receivedData.settings){
-    firstData=true;
+  } else if(kind==='ready'){
+    storeReady=true;
     hideSplash();
   }
-  if(receivedData.trips && receivedData.expenses && receivedData.settings) render();
+  normalizeCurrencyData();
+  if(storeReady) render();
+
+  if(pendingJoinedTripId && getTrip(pendingJoinedTripId)){
+    activeTripId=pendingJoinedTripId;
+    pendingJoinedTripId=null;
+    setTab('expenses');
+    toast('You joined the trip');
+  }
 }
 
 function normalizeCurrencyData(){
-  if(currencyMigrationStarted || !receivedData.trips || !receivedData.expenses || !receivedData.settings) return;
+  if(currencyMigrationStarted || !storeReady) return;
   currencyMigrationStarted = true;
 
   trips.forEach(trip=>{
@@ -134,14 +138,8 @@ function handleErr(err){
 }
 function loginMsg(t){ const el=document.getElementById('loginMsg'); if(el) el.textContent=t; }
 function signIn(){
-  loginMsg('Opening Google sign-in…');
-  auth.signInWithPopup(googleProvider).catch(err=>{
-    const fallback=['auth/popup-blocked','auth/operation-not-supported-in-this-environment',
-      'auth/cancelled-popup-request','auth/popup-closed-by-user'];
-    if(fallback.includes(err.code)){
-      auth.signInWithRedirect(googleProvider).catch(showSignInErr);
-    } else showSignInErr(err);
-  });
+  loginMsg('Redirecting to Google sign-in…');
+  auth.signInWithRedirect(googleProvider).catch(showSignInErr);
 }
 function showSignInErr(err){
   console.error('Sign-in error:', err);
@@ -158,22 +156,54 @@ function doSignOut(){
   auth.signOut().catch(()=>{});
 }
 
+function clearInviteFromUrl(){
+  const url=new URL(window.location.href);
+  url.searchParams.delete('invite');
+  window.history.replaceState({},'',url);
+  pendingInviteId=null;
+}
+async function joinPendingInvite(user){
+  if(!pendingInviteId || inviteJoinInProgress) return;
+  inviteJoinInProgress=true;
+  try{
+    const trip=await Store.acceptTripInvite(pendingInviteId);
+    clearInviteFromUrl();
+    pendingJoinedTripId=trip.tripId;
+    activeTripId=trip.tripId;
+    Store.saveSettings({activeTripId}).catch(handleErr);
+    if(getTrip(trip.tripId)){
+      pendingJoinedTripId=null;
+      setTab('expenses');
+    } else {
+      toast(`Joined ${trip.tripName||'the trip'} — loading`);
+    }
+  } catch(err){
+    console.error('Trip invite error:',err);
+    toast(err.message||'Could not join this trip. Check Firebase access.');
+  } finally {
+    inviteJoinInProgress=false;
+  }
+}
+
 auth.onAuthStateChanged(user=>{
   if(user){
-    currentUser=user; firstData=false;
-    receivedData={trips:false, expenses:false, settings:false};
+    currentUser=user;
     currencyMigrationStarted=false;
+    storeReady=false;
+    pendingJoinedTripId=null;
     setAvatar(user);
     showApp();
     Store.setUser(user.uid);
     Store.subscribe(onStoreData);
+    joinPendingInvite(user);
   } else {
     currentUser=null;
-    receivedData={trips:false, expenses:false, settings:false};
+    storeReady=false;
     currencyMigrationStarted=false;
     Store.stop();
     trips=[]; expenses=[]; customCats=[]; activeTripId=null;
-    loginMsg('Your data is private to your account.');
+    pendingJoinedTripId=null;
+    loginMsg(pendingInviteId?'Sign in with Google to join this trip.':'Your data is private to your account.');
     showLogin();
   }
 });
@@ -307,7 +337,8 @@ function renderTrips(){
     h += `<div class="card trip-card ${active?'active':''}" onclick="openTrip('${t.id}')">
       <span class="accent"></span>
       <div class="row between"><h3>${esc(t.name)}</h3>
-        <span class="pill">₹ INR</span></div>
+        <div class="row">${t.ownerUid===currentUser?.uid?`<button class="link" onclick="openInviteFromCard(event,'${t.id}')">Invite</button>`:''}
+        <span class="pill">₹ INR</span></div></div>
       ${d? `<div class="small muted" style="padding-left:8px;margin-top:3px">
         <i class="fa-regular fa-calendar"></i> ${shortDate(t.startDate)} – ${shortDate(t.endDate)}
         · ${d.status==='upcoming'?'upcoming':d.status==='ended'?'ended':d.left+' day'+(d.left!==1?'s':'')+' left'}</div>`:''}
@@ -514,6 +545,7 @@ function renderBudget(){
     h += `</div>`;
   }
   h += `<button class="btn ghost" onclick="openBudgetSheet()">${b?'Edit budget':'Set a budget'}</button>
+    ${t.ownerUid===currentUser?.uid?`<button class="btn ghost" style="margin-top:12px" onclick="openInviteSheet('${t.id}')">${icon('fa-solid fa-user-plus')} Invite collaborators</button>`:''}
     <button class="btn ghost" style="margin-top:12px" onclick="openTripSheet('${t.id}')">${icon('fa-solid fa-pen')} Edit trip details</button>
     <button class="btn danger" style="margin-top:12px" onclick="confirmDeleteTrip('${t.id}')">${icon('fa-solid fa-trash-can')} Delete this trip</button>`;
   el.innerHTML = h;
@@ -526,6 +558,80 @@ function closeSheet(){ overlay.classList.remove('open'); }
 overlay.addEventListener('click', e=>{ if(e.target===overlay) closeSheet(); });
 
 function openTrip(id){ activeTripId=id; Store.saveSettings({activeTripId:id}).catch(()=>{}); setTab('expenses'); }
+function openInviteFromCard(event,id){
+  event.stopPropagation();
+  openInviteSheet(id);
+}
+
+function inviteUrl(inviteId){
+  const url=new URL(window.location.href);
+  url.searchParams.set('invite',inviteId);
+  url.hash='';
+  return url.toString();
+}
+function openInviteSheet(id){
+  const trip=getTrip(id);
+  if(!trip || trip.ownerUid!==currentUser?.uid){
+    toast('Only the trip owner can create or manage invite links');
+    return;
+  }
+  const link=trip.inviteId?inviteUrl(trip.inviteId):'';
+  openSheet(`<h2>Invite collaborators</h2>
+    <p class="small muted" style="margin-bottom:16px">Anyone with this link can join this trip and collaborate on its details and expenses.</p>
+    ${link?`<div class="field"><label>Invite link</label><input id="inviteUrl" readonly value="${esc(link)}"></div>
+      <button class="btn" onclick="shareInviteLink('${id}')">${icon('fa-solid fa-link')} Share invite link</button>
+      <button class="btn danger" style="margin-top:10px" onclick="revokeTripInvite('${id}')">Revoke invite link</button>`
+      :`<button class="btn" onclick="createTripInvite('${id}')">${icon('fa-solid fa-link')} Create invite link</button>`}
+    <button class="btn ghost" style="margin-top:10px" onclick="closeSheet()">Done</button>`);
+}
+async function createTripInvite(id){
+  const trip=getTrip(id);
+  if(!trip || trip.ownerUid!==currentUser?.uid) return;
+  try{
+    trip.inviteId=await Store.createTripInvite(trip);
+    openInviteSheet(id);
+    toast('Invite link created');
+  } catch(err){
+    handleErr(err);
+  }
+}
+async function shareInviteLink(id){
+  const trip=getTrip(id);
+  if(!trip || trip.ownerUid!==currentUser?.uid) return;
+  if(!trip.inviteId){
+    await createTripInvite(id);
+    return;
+  }
+  const link=inviteUrl(trip.inviteId);
+  try{
+    if(navigator.share){
+      await navigator.share({title:`Join ${trip.name} on TripSpend`,text:'Join this shared trip on TripSpend.',url:link});
+    } else if(navigator.clipboard){
+      await navigator.clipboard.writeText(link);
+      toast('Invite link copied');
+    } else {
+      throw new Error('Clipboard is unavailable');
+    }
+  } catch(err){
+    if(err && err.name==='AbortError') return;
+    console.error('Invite link share error:',err);
+    const input=document.getElementById('inviteUrl');
+    if(input) { input.focus(); input.select(); }
+    toast('Copy the invite link shown above');
+  }
+}
+async function revokeTripInvite(id){
+  const trip=getTrip(id);
+  if(!trip || trip.ownerUid!==currentUser?.uid || !trip.inviteId) return;
+  try{
+    await Store.revokeTripInvite(trip);
+    trip.inviteId=null;
+    openInviteSheet(id);
+    toast('Invite link revoked');
+  } catch(err){
+    handleErr(err);
+  }
+}
 
 /* --- Trip sheet --- */
 let draftTravelers = [];
@@ -537,7 +643,10 @@ function renderTravelers(){
     </div>`).join('') +
     `<button class="btn ghost sm" onclick="addTraveler()">${icon('fa-solid fa-user-plus')} Add traveler</button>`;
 }
-function addTraveler(){ draftTravelers.push({id:uid(),name:''}); renderTravelers(); }
+function addTraveler(){
+  if(draftTravelers.length>=10){ toast('A trip can have up to 10 travelers'); return; }
+  draftTravelers.push({id:uid(),name:''}); renderTravelers();
+}
 function removeTraveler(i){ draftTravelers.splice(i,1); renderTravelers(); }
 function openTripSheet(id){
   const t = id? getTrip(id):null;
@@ -576,7 +685,7 @@ function saveTrip(id){
     Object.assign(t,{name,currency:'INR',budget,startDate,endDate,travelers});
     toast('Trip updated');
   } else {
-    t={id:uid(),name,currency:'INR',budget,startDate,endDate,travelers,createdAt:Date.now()};
+    t={id:uid(),ownerUid:currentUser.uid,name,currency:'INR',budget,startDate,endDate,travelers,createdAt:Date.now()};
     trips.push(t); activeTripId=t.id;
     Store.saveSettings({activeTripId:t.id}).catch(()=>{});
     toast('Trip created');
@@ -666,7 +775,7 @@ function saveExp(id){
   const note=document.getElementById('f_note').value.trim();
   const date=document.getElementById('f_date').value||todayISO();
   if(!raw||raw<=0){ toast('Enter a valid amount'); return; }
-  const rec={amount:raw, category:cat, method, note, date, photo:draftPhoto||null};
+  const rec={ownerUid:t.ownerUid,amount:raw, category:cat, method, note, date, photo:draftPhoto||null};
   if((t.travelers||[]).length){
     rec.paidBy=document.getElementById('f_paidv').value;
     rec.participants=draftPart.length?draftPart.slice():(t.travelers.map(v=>v.id));
@@ -683,8 +792,9 @@ function saveExp(id){
   closeSheet(); render();
 }
 function deleteExp(id){
+  const expense=expenses.find(item=>item.id===id);
   expenses=expenses.filter(x=>x.id!==id);
-  Store.deleteExpense(id).catch(handleErr);
+  Store.deleteExpense(id,expense?.ownerUid||currentUser.uid).catch(handleErr);
   closeSheet(); toast('Expense deleted'); render();
 }
 
@@ -714,10 +824,12 @@ function confirmDeleteTrip(id){
     <button class="btn ghost" style="margin-top:10px" onclick="closeSheet()">Cancel</button>`);
 }
 function deleteTrip(id){
+  const trip=getTrip(id);
+  if(!trip) return;
   const expIds=expenses.filter(e=>e.tripId===id).map(e=>e.id);
   trips=trips.filter(t=>t.id!==id);
   expenses=expenses.filter(e=>e.tripId!==id);
-  Store.deleteTripCascade(id, expIds).catch(handleErr);
+  Store.deleteTripCascade(id,expIds,trip.ownerUid,trip.inviteId).catch(handleErr);
   if(activeTripId===id){ activeTripId = trips.length? trips[0].id:null;
     Store.saveSettings({activeTripId}).catch(()=>{}); }
   closeSheet(); toast('Trip deleted'); setTab('trips');
@@ -795,6 +907,7 @@ function openCatSheet(id){
 function saveCat(id){
   const name=document.getElementById('f_catname').value.trim();
   if(!name){ toast('Enter a name'); return; }
+  if(!id && customCats.length>=10){ toast('You can add up to 10 custom categories'); return; }
   if(id){ const c=customCats.find(x=>x.id===id); if(c) Object.assign(c,{name,ic:draftCatIcon,c:draftCatColor}); }
   else customCats.push({id:'c_'+uid(),name,ic:draftCatIcon,c:draftCatColor,custom:true});
   Store.saveCats(customCats).catch(handleErr);

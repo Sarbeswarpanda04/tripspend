@@ -1,64 +1,248 @@
 /* ============================================================
    Data layer — all Firestore access lives here.
-   Documents:
-     users/{uid}/trips/{tripId}
-     users/{uid}/expenses/{expId}
-     users/{uid}/meta/settings   (theme, homeCurrency, rates, activeTripId)
-     users/{uid}/meta/cats       ({ list: [...customCategories] })
-   The UI keeps in-memory arrays that are refreshed by realtime
-   listeners, so multiple devices stay in sync automatically.
+   Owner data:
+     users/{ownerUid}/trips/{tripId}
+     users/{ownerUid}/expenses/{expenseId}
+   Shared trip memberships:
+     users/{uid}/joinedTrips/{ownerUid}_{tripId}
+     tripShares/{ownerUid}/trips/{tripId}/members/{uid}
+   Invitations:
+     tripInvites/{inviteId}
    ============================================================ */
 const Store = (() => {
   let uid = null;
+  let callback = null;
   let unsub = [];
+  let joinedUnsub = [];
+  let joinedTripUnsub = new Map();
+  let ownTrips = [];
+  let ownExpenses = [];
+  let sharedTrips = new Map();
+  let sharedExpenses = new Map();
+  let readyState = null;
 
   const U = () => db.collection('users').doc(uid);
+  const ownerUser = ownerUid => db.collection('users').doc(ownerUid);
+  const shareKey = (ownerUid, tripId) => `${ownerUid}_${tripId}`;
+  const shareMembers = (ownerUid, tripId) => db.collection('tripShares').doc(ownerUid)
+    .collection('trips').doc(tripId).collection('members');
 
-  /* Firestore rejects `undefined`; scrub it to null / drop it. */
   const clean = obj => JSON.parse(JSON.stringify(obj));
+  const emit = (kind, data) => { if(callback) callback(kind, data); };
+  const emitTrips = () => emit('trips', ownTrips.concat(...sharedTrips.values()));
+  const emitExpenses = () => emit('expenses', ownExpenses.concat(...sharedExpenses.values()));
+  const markReady = key => {
+    if(!readyState || readyState.sent) return;
+    readyState[key]=true;
+    if(readyState.trips && readyState.expenses && readyState.settings){
+      readyState.sent=true;
+      emit('ready');
+    }
+  };
+
+  function stopJoinedListeners(){
+    joinedUnsub.forEach(stop=>stop());
+    joinedUnsub=[];
+    joinedTripUnsub.forEach(listeners=>listeners.forEach(stop=>stop()));
+    joinedTripUnsub.clear();
+    sharedTrips.clear();
+    sharedExpenses.clear();
+  }
+
+  function watchJoinedTrips(snapshot){
+    const current = new Map();
+    snapshot.docs.forEach(doc=>{
+      const membership=doc.data();
+      if(membership.ownerUid && membership.tripId){
+        current.set(doc.id, membership);
+      } else {
+        emit('error', new Error(`Invalid joined trip record: ${doc.id}`));
+      }
+    });
+
+    joinedTripUnsub.forEach((listeners,key)=>{
+      if(!current.has(key)){
+        listeners.forEach(stop=>stop());
+        joinedTripUnsub.delete(key);
+        sharedTrips.delete(key);
+        sharedExpenses.delete(key);
+      }
+    });
+
+    current.forEach((membership,key)=>{
+      if(joinedTripUnsub.has(key)) return;
+      const {ownerUid,tripId}=membership;
+      const owner=ownerUser(ownerUid);
+      const listeners=[];
+      listeners.push(owner.collection('trips').doc(tripId).onSnapshot(
+        doc=>{
+          if(doc.exists){
+            sharedTrips.set(key,{id:doc.id,...doc.data(),ownerUid});
+          } else {
+            sharedTrips.delete(key);
+          }
+          emitTrips();
+        },
+        error=>emit('error',error)));
+      listeners.push(owner.collection('expenses').where('tripId','==',tripId).onSnapshot(
+        docs=>{
+          sharedExpenses.set(key,docs.docs.map(doc=>({id:doc.id,...doc.data(),ownerUid})));
+          emitExpenses();
+        },
+        error=>emit('error',error)));
+      joinedTripUnsub.set(key,listeners);
+    });
+
+    emitTrips();
+    emitExpenses();
+  }
 
   return {
     setUser(id) { uid = id; },
     get uid() { return uid; },
 
-    /* Attach realtime listeners. cb(kind, data) is called on every change.
-       kinds: 'trips' | 'expenses' | 'settings' | 'cats' | 'error' */
     subscribe(cb) {
       this.stop();
+      callback=cb;
+      readyState={trips:false,expenses:false,settings:false,sent:false};
       unsub.push(U().collection('trips').onSnapshot(
-        s => cb('trips', s.docs.map(d => ({ id: d.id, ...d.data() }))),
-        err => cb('error', err)));
+        snapshot=>{
+          ownTrips=snapshot.docs.map(doc=>({id:doc.id,...doc.data(),ownerUid:uid}));
+          emitTrips();
+          markReady('trips');
+        },
+        error=>emit('error',error)));
       unsub.push(U().collection('expenses').onSnapshot(
-        s => cb('expenses', s.docs.map(d => ({ id: d.id, ...d.data() }))),
-        err => cb('error', err)));
+        snapshot=>{
+          ownExpenses=snapshot.docs.map(doc=>({id:doc.id,...doc.data(),ownerUid:uid}));
+          emitExpenses();
+          markReady('expenses');
+        },
+        error=>emit('error',error)));
       unsub.push(U().collection('meta').doc('settings').onSnapshot(
-        d => cb('settings', d.exists ? d.data() : null),
-        err => cb('error', err)));
+        doc=>{
+          emit('settings',doc.exists?doc.data():null);
+          markReady('settings');
+        },
+        error=>emit('error',error)));
       unsub.push(U().collection('meta').doc('cats').onSnapshot(
-        d => cb('cats', d.exists ? (d.data().list || []) : []),
-        err => cb('error', err)));
+        doc=>emit('cats',doc.exists?(doc.data().list||[]):[]),
+        error=>emit('error',error)));
+      joinedUnsub.push(U().collection('joinedTrips').onSnapshot(
+        watchJoinedTrips,
+        error=>emit('error',error)));
     },
 
-    stop() { unsub.forEach(f => { try { f(); } catch {} }); unsub = []; },
+    stop() {
+      unsub.forEach(stop=>stop());
+      unsub=[];
+      stopJoinedListeners();
+      joinedUnsub.forEach(stop=>stop());
+      joinedUnsub=[];
+      callback=null;
+      readyState=null;
+      ownTrips=[];
+      ownExpenses=[];
+    },
 
-    /* ---- writes (return promises to Firestore only; no local DB fallback) ---- */
-    saveTrip(t) { return U().collection('trips').doc(t.id).set(clean(t)); },
-    saveExpense(e) { return U().collection('expenses').doc(e.id).set(clean(e)); },
-    deleteExpense(id) { return U().collection('expenses').doc(id).delete(); },
+    saveTrip(trip) {
+      const ownerUid=trip.ownerUid||uid;
+      return ownerUser(ownerUid).collection('trips').doc(trip.id)
+        .set(clean({...trip,ownerUid}));
+    },
+    saveExpense(expense) {
+      const ownerUid=expense.ownerUid||uid;
+      return ownerUser(ownerUid).collection('expenses').doc(expense.id)
+        .set(clean({...expense,ownerUid}));
+    },
+    deleteExpense(id,ownerUid=uid) {
+      return ownerUser(ownerUid).collection('expenses').doc(id).delete();
+    },
 
-    /* Delete a trip and every expense that belongs to it, atomically. */
-    deleteTripCascade(id, expIds) {
-      const batch = db.batch();
-      batch.delete(U().collection('trips').doc(id));
-      expIds.forEach(eid => batch.delete(U().collection('expenses').doc(eid)));
+    deleteTripCascade(id,expIds,ownerUid=uid,inviteId=null) {
+      const owner=ownerUser(ownerUid);
+      const batch=db.batch();
+      batch.delete(owner.collection('trips').doc(id));
+      expIds.forEach(expenseId=>batch.delete(owner.collection('expenses').doc(expenseId)));
+      if(inviteId && ownerUid===uid){
+        batch.delete(db.collection('tripInvites').doc(inviteId));
+      }
       return batch.commit();
     },
 
+    createTripInvite(trip) {
+      const ownerUid=trip.ownerUid||uid;
+      const ownerTrip=ownerUser(ownerUid).collection('trips').doc(trip.id);
+      const inviteRef=db.collection('tripInvites').doc();
+      return db.runTransaction(async transaction=>{
+        const tripDoc=await transaction.get(ownerTrip);
+        if(!tripDoc.exists) throw new Error('This trip no longer exists.');
+        const existingId=tripDoc.data().inviteId;
+        if(existingId){
+          const existingInvite=await transaction.get(db.collection('tripInvites').doc(existingId));
+          if(existingInvite.exists && existingInvite.data().active===true) return existingId;
+        }
+        transaction.set(inviteRef,{
+          ownerUid,
+          tripId:trip.id,
+          tripName:trip.name,
+          active:true,
+          createdAt:firebase.firestore.FieldValue.serverTimestamp()
+        });
+        transaction.update(ownerTrip,{inviteId:inviteRef.id});
+        return inviteRef.id;
+      });
+    },
+
+    revokeTripInvite(trip) {
+      const ownerUid=trip.ownerUid||uid;
+      const ownerTrip=ownerUser(ownerUid).collection('trips').doc(trip.id);
+      const inviteRef=db.collection('tripInvites').doc(trip.inviteId);
+      return db.runTransaction(async transaction=>{
+        const tripDoc=await transaction.get(ownerTrip);
+        if(!tripDoc.exists || tripDoc.data().inviteId!==trip.inviteId) return;
+        const inviteDoc=await transaction.get(inviteRef);
+        if(inviteDoc.exists) transaction.update(inviteRef,{active:false});
+        transaction.update(ownerTrip,{inviteId:null});
+      });
+    },
+
+    acceptTripInvite(inviteId) {
+      const inviteRef=db.collection('tripInvites').doc(inviteId);
+      return db.runTransaction(async transaction=>{
+        const inviteDoc=await transaction.get(inviteRef);
+        if(!inviteDoc.exists || inviteDoc.data().active!==true){
+          throw new Error('This invite link is invalid or has been revoked.');
+        }
+        const invite=inviteDoc.data();
+        const {ownerUid,tripId}=invite;
+        if(!ownerUid || !tripId) throw new Error('This invite link is invalid.');
+        if(ownerUid===uid) return {ownerUid,tripId,tripName:invite.tripName};
+
+        const key=shareKey(ownerUid,tripId);
+        const memberRef=shareMembers(ownerUid,tripId).doc(uid);
+        const joinedRef=U().collection('joinedTrips').doc(key);
+        const [memberDoc,joinedDoc]=await Promise.all([
+          transaction.get(memberRef),
+          transaction.get(joinedRef)
+        ]);
+        const membership={
+          ownerUid,
+          tripId,
+          inviteId,
+          joinedAt:firebase.firestore.FieldValue.serverTimestamp()
+        };
+        if(!memberDoc.exists) transaction.set(memberRef,{uid,...membership});
+        if(!joinedDoc.exists) transaction.set(joinedRef,membership);
+        return {ownerUid,tripId,tripName:invite.tripName};
+      });
+    },
+
     saveSettings(patch) {
-      return U().collection('meta').doc('settings').set(clean(patch), { merge: true });
+      return U().collection('meta').doc('settings').set(clean(patch),{merge:true});
     },
     saveCats(list) {
-      return U().collection('meta').doc('cats').set({ list: clean(list) });
+      return U().collection('meta').doc('cats').set({list:clean(list)});
     },
   };
 })();
