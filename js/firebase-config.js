@@ -21,7 +21,14 @@ firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
 
-/* Remote-only auth and database access. No local persistence is enabled
-   for the app's data layer, so all reads/writes stay in Firebase. */
+/* Keep the Firebase Auth session across reloads. This stores only the
+   authentication session; trip and expense data remain in Firestore. */
+const authPersistenceReady = auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+  .then(()=>true)
+  .catch(err=>{
+    console.error('Firebase Auth persistence error:',err);
+    return false;
+  });
+
 const googleProvider = new firebase.auth.GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });

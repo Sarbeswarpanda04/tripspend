@@ -1,6 +1,6 @@
 /* TripSpend service worker — offline app shell.
    App data lives in Firestore's IndexedDB cache, not here. */
-const CACHE = 'tripspend-v4';
+const CACHE = 'tripspend-v5';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './icon.svg',
   './css/styles.css',

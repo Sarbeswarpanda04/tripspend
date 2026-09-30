@@ -137,9 +137,18 @@ function handleErr(err){
   }
 }
 function loginMsg(t){ const el=document.getElementById('loginMsg'); if(el) el.textContent=t; }
-function signIn(){
+async function signIn(){
   loginMsg('Redirecting to Google sign-in…');
-  auth.signInWithRedirect(googleProvider).catch(showSignInErr);
+  try{
+    const persistenceReady=await authPersistenceReady;
+    if(!persistenceReady){
+      loginMsg('Could not save the sign-in session. Check Firebase Auth configuration and try again.');
+      return;
+    }
+    await auth.signInWithRedirect(googleProvider);
+  } catch(err){
+    showSignInErr(err);
+  }
 }
 function showSignInErr(err){
   console.error('Sign-in error:', err);
@@ -206,6 +215,9 @@ auth.onAuthStateChanged(user=>{
     loginMsg(pendingInviteId?'Sign in with Google to join this trip.':'Your data is private to your account.');
     showLogin();
   }
+},err=>{
+  console.error('Auth state error:',err);
+  loginMsg('Sign-in session error: '+(err.message||err.code||'unknown error'));
 });
 /* Surface any redirect-based sign-in error. */
 auth.getRedirectResult().catch(showSignInErr);
