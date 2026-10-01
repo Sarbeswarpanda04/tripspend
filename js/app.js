@@ -28,6 +28,8 @@ let initialLoadError = false;
 let initialLoadErrorSource = null;
 let inviteJoinInProgress = false;
 let pendingJoinedTripId = null;
+let expenseSaveInProgress = false;
+const acceptingCollaborationInvites = new Set();
 let discoverable = false;
 let collaborationInvites = [];
 let collaboratorSearchTimer = null;
@@ -450,7 +452,7 @@ function renderTrips(){
           <div class="row between" style="gap:12px">
             <div style="min-width:0"><strong>${esc(invite.tripName)}</strong>
               <div class="small muted" style="margin-top:4px">${esc(invite.ownerName)} invited you to collaborate</div></div>
-            <button class="btn sm" onclick="acceptCollaborationInvite('${esc(invite.id)}')">Accept</button>
+            <button class="btn sm" onclick="acceptCollaborationInvite('${esc(invite.id)}',this)">Accept</button>
           </div>
         </div>`).join('')}`
     : '';
@@ -838,11 +840,17 @@ async function sendCollaborationInvite(tripId,inviteeUid,button){
     toast(err.message||'Could not send invite');
   }
 }
-async function acceptCollaborationInvite(inviteId){
+async function acceptCollaborationInvite(inviteId,button){
+  if(acceptingCollaborationInvites.has(inviteId)) return;
+  acceptingCollaborationInvites.add(inviteId);
+  if(button){ button.disabled=true; button.textContent='Accepting…'; }
+  let completed=false;
   try{
     const result=await Store.acceptCollaborationInvite(inviteId);
     if(result.alreadyMember){
+      if(button) button.textContent='Already joined';
       toast('You already have access to this trip');
+      completed=true;
       return;
     }
     pendingJoinedTripId=result.tripId;
@@ -853,9 +861,14 @@ async function acceptCollaborationInvite(inviteId){
       setTab('expenses');
     }
     toast(`Joined ${result.tripName}`);
+    if(button) button.textContent='Accepted';
+    completed=true;
   } catch(err){
     console.error('Collaboration invite acceptance error:',err);
     toast(err.message||'Could not accept collaboration invite');
+  } finally {
+    acceptingCollaborationInvites.delete(inviteId);
+    if(!completed&&button?.isConnected){ button.disabled=false; button.textContent='Accept'; }
   }
 }
 async function createTripInvite(id){
@@ -1139,7 +1152,7 @@ function openExpSheet(id){
     <button class="btn ghost sm" style="margin:-4px 0 14px" onclick="setExpenseNow()">${icon('fa-solid fa-clock')} Now</button>
     ${splitHtml}
     <div class="field"><label>Receipt</label><div id="f_photo"></div></div>
-    <button class="btn" onclick="saveExp('${id||''}')">${e?'Save changes':'Add expense'}</button>
+    <button id="saveExpenseBtn" class="btn" onclick="saveExp('${id||''}')">${e?'Save changes':'Add expense'}</button>
     ${e?`<button class="btn danger" style="margin-top:10px" onclick="deleteExp('${id}')">Delete expense</button>`:''}`);
   renderPhoto();
   setTimeout(()=>{ const f=document.getElementById('f_amt'); if(f) f.focus(); },260);
@@ -1166,6 +1179,7 @@ function pickPaidBy(el){ document.querySelectorAll('#f_paid .chip').forEach(c=>c
 function togglePart(el){ el.classList.toggle('sel');
   const id=el.dataset.pt; if(draftPart.includes(id)) draftPart=draftPart.filter(x=>x!==id); else draftPart.push(id); }
 async function saveExp(id){
+  if(expenseSaveInProgress) return;
   const t=getTrip(activeTripId); if(!t) return;
   const raw=parseFloat(document.getElementById('f_amt').value);
   const cat=document.getElementById('f_cat').value;
@@ -1195,15 +1209,25 @@ async function saveExp(id){
   } else {
     expense={id:uid(),tripId:activeTripId,createdAt:Date.now(),...rec};
   }
+  expenseSaveInProgress=true;
+  const saveButton=document.getElementById('saveExpenseBtn');
+  if(saveButton){ saveButton.disabled=true; saveButton.textContent='Saving…'; }
   try{
     await Store.saveExpense(expense);
-    if(id) expenses=expenses.map(existing=>existing.id===id?expense:existing);
-    else expenses.push(expense);
+    const existingIndex=expenses.findIndex(existing=>existing.id===expense.id);
+    if(existingIndex<0) expenses.push(expense);
+    else expenses[existingIndex]=expense;
     closeSheet();
     toast(id?'Expense updated':'Expense added');
     render();
   } catch(err){
+    if(saveButton?.isConnected){
+      saveButton.disabled=false;
+      saveButton.textContent=id?'Save changes':'Add expense';
+    }
     handleErr(err);
+  } finally {
+    expenseSaveInProgress=false;
   }
 }
 async function deleteExp(id){

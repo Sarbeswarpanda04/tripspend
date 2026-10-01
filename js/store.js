@@ -391,6 +391,9 @@ const Store = (() => {
           transaction.get(joinedRef)
         ]);
         if(memberDoc.exists || joinedDoc.exists){
+          if(memberDoc.exists!==joinedDoc.exists){
+            throw new Error('This invite has incomplete trip access records. Ask the trip owner to remove your existing access and send a new invite.');
+          }
           if(memberDoc.exists && joinedDoc.exists){
             transaction.update(inviteRef,{
               status:'accepted',
