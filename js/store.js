@@ -34,7 +34,7 @@ const Store = (() => {
   const markReady = key => {
     if(!readyState || readyState.sent) return;
     readyState[key]=true;
-    if(readyState.trips && readyState.expenses && readyState.settings){
+    if(readyState.trips && readyState.expenses && readyState.settings && readyState.catalog){
       readyState.sent=true;
       emit('ready');
     }
@@ -104,27 +104,37 @@ const Store = (() => {
     subscribe(cb) {
       this.stop();
       callback=cb;
-      readyState={trips:false,expenses:false,settings:false,sent:false};
+      readyState={trips:false,expenses:false,settings:false,catalog:false,sent:false};
+      unsub.push(db.collection('appConfig').doc('catalog').onSnapshot(
+        snapshot=>{
+          if(!snapshot.exists){
+            emit('error',{source:'catalog',error:new Error('Firestore appConfig/catalog does not exist.')});
+            return;
+          }
+          emit('catalog',snapshot.data());
+          markReady('catalog');
+        },
+        error=>emit('error',{source:'catalog',error})));
       unsub.push(U().collection('trips').onSnapshot(
         snapshot=>{
           ownTrips=snapshot.docs.map(doc=>({id:doc.id,...doc.data(),ownerUid:uid}));
           emitTrips();
           markReady('trips');
         },
-        error=>emit('error',error)));
+        error=>emit('error',{source:'trips',error})));
       unsub.push(U().collection('expenses').onSnapshot(
         snapshot=>{
           ownExpenses=snapshot.docs.map(doc=>({id:doc.id,...doc.data(),ownerUid:uid}));
           emitExpenses();
           markReady('expenses');
         },
-        error=>emit('error',error)));
+        error=>emit('error',{source:'expenses',error})));
       unsub.push(U().collection('meta').doc('settings').onSnapshot(
         doc=>{
           emit('settings',doc.exists?doc.data():null);
           markReady('settings');
         },
-        error=>emit('error',error)));
+        error=>emit('error',{source:'settings',error})));
       unsub.push(U().collection('meta').doc('cats').onSnapshot(
         doc=>emit('cats',doc.exists?(doc.data().list||[]):[]),
         error=>emit('error',error)));
@@ -168,20 +178,74 @@ const Store = (() => {
       return ownerUser(ownerUid).collection('expenses').doc(id).delete();
     },
 
-    deleteTripCascade(id,expIds,ownerUid=uid,inviteId=null) {
+    async deleteTripCascade(id,ownerUid=uid,inviteId=null) {
       const owner=ownerUser(ownerUid);
-      return db.collection('collaborationInvites')
-        .where('ownerUid','==',ownerUid).limit(450).get()
-        .then(snapshot=>{
-          const batch=db.batch();
-          batch.delete(owner.collection('trips').doc(id));
-          expIds.forEach(expenseId=>batch.delete(owner.collection('expenses').doc(expenseId)));
-          snapshot.docs.filter(doc=>doc.data().tripId===id).forEach(doc=>batch.delete(doc.ref));
-          if(inviteId && ownerUid===uid){
-            batch.delete(db.collection('tripInvites').doc(inviteId));
+      const [expenseSnapshot,memberSnapshot]=await Promise.all([
+        owner.collection('expenses').where('tripId','==',id).get(),
+        shareMembers(ownerUid,id).get()
+      ]);
+
+      const collaborationDocs=[];
+      let cursor=null;
+      while(true){
+        let query=db.collection('collaborationInvites')
+          .where('ownerUid','==',ownerUid)
+          .orderBy(firebase.firestore.FieldPath.documentId())
+          .limit(450);
+        if(cursor) query=query.startAfter(cursor);
+        const page=await query.get();
+        collaborationDocs.push(...page.docs.filter(doc=>doc.data().tripId===id));
+        if(page.size<450) break;
+        cursor=page.docs[page.docs.length-1];
+      }
+
+      const inviteByMember=new Map(collaborationDocs.map(doc=>[doc.data().inviteeUid,doc]));
+      for(let offset=0;offset<memberSnapshot.docs.length;offset+=5){
+        const members=memberSnapshot.docs.slice(offset,offset+5);
+        const joinedSnapshots=await Promise.all(members.map(member=>
+          ownerUser(member.id).collection('joinedTrips').doc(shareKey(ownerUid,id)).get()));
+        const batch=db.batch();
+        for(let index=0;index<members.length;index++){
+          const member=members[index];
+          batch.delete(member.ref);
+          if(joinedSnapshots[index].exists){
+            batch.delete(joinedSnapshots[index].ref);
           }
-          return batch.commit();
-        });
+          const invite=inviteByMember.get(member.id);
+          if(invite){
+            batch.delete(invite.ref);
+            inviteByMember.delete(member.id);
+          }
+        }
+        await batch.commit();
+      }
+
+      const deleteRefs=[
+        ...expenseSnapshot.docs.map(doc=>doc.ref)
+      ];
+      for(let offset=0;offset<deleteRefs.length;offset+=450){
+        const deleteBatch=db.batch();
+        deleteRefs.slice(offset,offset+450).forEach(ref=>deleteBatch.delete(ref));
+        await deleteBatch.commit();
+      }
+
+      const tripInviteRef=inviteId&&ownerUid===uid
+        ? db.collection('tripInvites').doc(inviteId)
+        : null;
+      const tripInviteExists=tripInviteRef&&(await tripInviteRef.get()).exists;
+      const finalBatch=db.batch();
+      finalBatch.delete(owner.collection('trips').doc(id));
+      if(tripInviteExists) finalBatch.delete(tripInviteRef);
+      const pendingInviteRefs=collaborationDocs
+        .filter(doc=>inviteByMember.has(doc.data().inviteeUid))
+        .map(doc=>doc.ref);
+      pendingInviteRefs.slice(0,5).forEach(ref=>finalBatch.delete(ref));
+      await finalBatch.commit();
+      for(let offset=5;offset<pendingInviteRefs.length;offset+=450){
+        const inviteBatch=db.batch();
+        pendingInviteRefs.slice(offset,offset+450).forEach(ref=>inviteBatch.delete(ref));
+        await inviteBatch.commit();
+      }
     },
 
     createTripInvite(trip) {
@@ -216,7 +280,9 @@ const Store = (() => {
         const tripDoc=await transaction.get(ownerTrip);
         if(!tripDoc.exists || tripDoc.data().inviteId!==trip.inviteId) return;
         const inviteDoc=await transaction.get(inviteRef);
-        if(inviteDoc.exists) transaction.update(inviteRef,{active:false});
+        if(inviteDoc.exists && inviteDoc.data().active===true){
+          transaction.update(inviteRef,{active:false});
+        }
         transaction.update(ownerTrip,{inviteId:null});
       });
     },

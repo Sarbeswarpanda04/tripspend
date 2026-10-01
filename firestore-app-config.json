@@ -1,0 +1,61 @@
+{
+  "currencyCode": "INR",
+  "currencySymbol": "₹",
+  "exchangeRates": {
+    "USD": 1,
+    "EUR": 1.08,
+    "GBP": 1.27,
+    "INR": 0.012,
+    "JPY": 0.0067,
+    "AUD": 0.66,
+    "CAD": 0.73,
+    "AED": 0.27,
+    "SGD": 0.74
+  },
+  "categories": [
+    { "id": "food", "name": "Food & Drink", "ic": "fa-solid fa-utensils", "c": "#f59e0b", "custom": false },
+    { "id": "transport", "name": "Transport", "ic": "fa-solid fa-taxi", "c": "#3b82f6", "custom": false },
+    { "id": "stay", "name": "Accommodation", "ic": "fa-solid fa-bed", "c": "#8b5cf6", "custom": false },
+    { "id": "activity", "name": "Activities", "ic": "fa-solid fa-umbrella-beach", "c": "#ec4899", "custom": false },
+    { "id": "shopping", "name": "Shopping", "ic": "fa-solid fa-bag-shopping", "c": "#14b8a6", "custom": false },
+    { "id": "grocery", "name": "Groceries", "ic": "fa-solid fa-cart-shopping", "c": "#84cc16", "custom": false },
+    { "id": "health", "name": "Health", "ic": "fa-solid fa-briefcase-medical", "c": "#ef4444", "custom": false },
+    { "id": "fees", "name": "Fees & Tips", "ic": "fa-solid fa-receipt", "c": "#06b6d4", "custom": false },
+    { "id": "misc", "name": "Miscellaneous", "ic": "fa-solid fa-box", "c": "#94a3b8", "custom": false }
+  ],
+  "categoryIcons": [
+    "fa-solid fa-plane",
+    "fa-solid fa-gift",
+    "fa-solid fa-mug-hot",
+    "fa-solid fa-gas-pump",
+    "fa-solid fa-ticket",
+    "fa-solid fa-camera",
+    "fa-solid fa-wine-glass",
+    "fa-solid fa-gamepad",
+    "fa-solid fa-book",
+    "fa-solid fa-heart",
+    "fa-solid fa-star",
+    "fa-solid fa-dumbbell",
+    "fa-solid fa-spa",
+    "fa-solid fa-train",
+    "fa-solid fa-ship",
+    "fa-solid fa-paw"
+  ],
+  "categoryColors": [
+    "#ef4444",
+    "#f97316",
+    "#f59e0b",
+    "#84cc16",
+    "#10b981",
+    "#14b8a6",
+    "#06b6d4",
+    "#3b82f6",
+    "#8b5cf6",
+    "#ec4899"
+  ],
+  "paymentMethods": {
+    "card": { "name": "Card", "ic": "fa-solid fa-credit-card" },
+    "cash": { "name": "Cash", "ic": "fa-solid fa-money-bill-wave" },
+    "other": { "name": "Other", "ic": "fa-solid fa-ellipsis" }
+  }
+}

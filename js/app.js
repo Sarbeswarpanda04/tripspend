@@ -5,31 +5,27 @@
    ============================================================ */
 
 /* ---- static data ---- */
-const CATS = [
-  {id:'food',      name:'Food & Drink',  ic:'fa-solid fa-utensils',         c:'#f59e0b'},
-  {id:'transport', name:'Transport',     ic:'fa-solid fa-taxi',             c:'#3b82f6'},
-  {id:'stay',      name:'Accommodation', ic:'fa-solid fa-bed',              c:'#8b5cf6'},
-  {id:'activity',  name:'Activities',    ic:'fa-solid fa-umbrella-beach',   c:'#ec4899'},
-  {id:'shopping',  name:'Shopping',      ic:'fa-solid fa-bag-shopping',     c:'#14b8a6'},
-  {id:'grocery',   name:'Groceries',     ic:'fa-solid fa-cart-shopping',    c:'#84cc16'},
-  {id:'health',    name:'Health',        ic:'fa-solid fa-briefcase-medical',c:'#ef4444'},
-  {id:'fees',      name:'Fees & Tips',   ic:'fa-solid fa-receipt',          c:'#06b6d4'},
-  {id:'misc',      name:'Miscellaneous', ic:'fa-solid fa-box',              c:'#94a3b8'},
-];
-const CUR = {INR:'₹'};
-const DEF_RATES = {USD:1,EUR:1.08,GBP:1.27,INR:0.012,JPY:0.0067,AUD:0.66,CAD:0.73,AED:0.27,SGD:0.74};
-const METHODS = {card:{name:'Card',ic:'fa-solid fa-credit-card'},
-                 cash:{name:'Cash',ic:'fa-solid fa-money-bill-wave'},
-                 other:{name:'Other',ic:'fa-solid fa-ellipsis'}};
+let CATS = [];
+let METHODS = {};
+let CAT_ICONS = [];
+let CAT_COLORS = [];
+let currencyCode = '';
+let currencySymbol = '';
+let exchangeRates = {};
+let catalogReady = false;
+let pendingSettings = null;
+let settingsReceived = false;
 
 /* ---- in-memory state (populated by Firestore listeners) ---- */
 let trips = [], expenses = [], customCats = [];
 let activeTripId = null;
-let settings = {theme:'light', homeCurrency:'INR', rates:Object.assign({}, DEF_RATES)};
+let settings = {theme:'light', homeCurrency:null, activeTripId:null};
 let currentTab = 'trips';
 let currentUser = null;
 let currencyMigrationStarted = false;
 let storeReady = false;
+let initialLoadError = false;
+let initialLoadErrorSource = null;
 let inviteJoinInProgress = false;
 let pendingJoinedTripId = null;
 let discoverable = false;
@@ -66,23 +62,45 @@ function setAvatar(user){
 }
 
 function onStoreData(kind, data){
-  if(kind==='error'){ handleErr(data); return; }
-  if(kind==='trips'){
+  if(kind==='error'){
+    handleErr(data?.error||data);
+    if(!storeReady&&['trips','expenses','settings','catalog'].includes(data?.source)){
+      initialLoadError=true;
+      initialLoadErrorSource=data.source;
+      storeReady=true;
+      render();
+    }
+    return;
+  }
+  if(kind==='catalog'){
+    if(!isValidCatalog(data)){
+      onStoreData('error',{source:'catalog',error:new Error('Shared Firebase catalog is missing or invalid.')});
+      return;
+    }
+    const migrationChanged=currencyCode!==data.currencyCode||
+      JSON.stringify(exchangeRates)!==JSON.stringify(data.exchangeRates);
+    CATS=data.categories;
+    METHODS=data.paymentMethods;
+    CAT_ICONS=data.categoryIcons;
+    CAT_COLORS=data.categoryColors;
+    currencyCode=data.currencyCode;
+    currencySymbol=data.currencySymbol;
+    exchangeRates=data.exchangeRates;
+    catalogReady=true;
+    if(initialLoadErrorSource==='catalog'){
+      initialLoadError=false;
+      initialLoadErrorSource=null;
+    }
+    if(migrationChanged) currencyMigrationStarted=false;
+    if(settingsReceived) applyRemoteSettings(pendingSettings);
+  } else if(kind==='trips'){
     trips = data;
   } else if(kind==='expenses'){
     expenses = data;
   } else if(kind==='settings'){
-    if(data){
-      if(data.theme) settings.theme = data.theme;
-      settings.homeCurrency = 'INR';
-      settings.rates = Object.assign({}, DEF_RATES, data.rates||{});
-      if('activeTripId' in data) activeTripId = data.activeTripId;
-      applyTheme();
-      if(data.homeCurrency !== 'INR') Store.saveSettings({homeCurrency:'INR'}).catch(handleErr);
-    } else if(currentUser){
-      Store.saveSettings({theme:settings.theme, homeCurrency:'INR',
-        rates:settings.rates, activeTripId:activeTripId}).catch(()=>{});
-    }
+    pendingSettings=data;
+    settingsReceived=true;
+    if(catalogReady) applyRemoteSettings(data);
   } else if(kind==='cats'){
     customCats = data;
   } else if(kind==='discoverable'){
@@ -97,6 +115,8 @@ function onStoreData(kind, data){
     collaborationInvites = data;
   } else if(kind==='ready'){
     storeReady=true;
+    initialLoadError=!catalogReady;
+    initialLoadErrorSource=initialLoadError?'catalog':null;
     hideSplash();
   }
   normalizeCurrencyData();
@@ -110,31 +130,78 @@ function onStoreData(kind, data){
   }
 }
 
+function isValidCatalog(data){
+  const validIcon=value=>typeof value==='string'&&/^[A-Za-z0-9 -]{1,80}$/.test(value);
+  return data&&
+    typeof data.currencyCode==='string'&&/^[A-Z]{3}$/.test(data.currencyCode)&&
+    typeof data.currencySymbol==='string'&&data.currencySymbol.length>0&&data.currencySymbol.length<=8&&
+      !/[&<>"']/.test(data.currencySymbol)&&
+    Array.isArray(data.categories)&&data.categories.length>0&&data.categories.every(category=>
+      category&&typeof category.id==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(category.id)&&
+      typeof category.name==='string'&&category.name.length>0&&category.name.length<=40&&
+      validIcon(category.ic)&&typeof category.c==='string'&&/^#[0-9A-Fa-f]{6}$/.test(category.c))&&
+    Array.isArray(data.categoryIcons)&&data.categoryIcons.length>0&&data.categoryIcons.every(validIcon)&&
+    Array.isArray(data.categoryColors)&&data.categoryColors.length>0&&data.categoryColors.every(color=>
+      typeof color==='string'&&/^#[0-9A-Fa-f]{6}$/.test(color))&&
+    data.paymentMethods&&typeof data.paymentMethods==='object'&&Object.keys(data.paymentMethods).length>0&&
+    Object.entries(data.paymentMethods).every(([id,method])=>
+      /^[A-Za-z0-9_-]{1,40}$/.test(id)&&method&&typeof method.name==='string'&&
+      method.name.length>0&&method.name.length<=40&&validIcon(method.ic))&&
+    data.exchangeRates&&typeof data.exchangeRates==='object'&&
+    Object.entries(data.exchangeRates).every(([code,rate])=>
+      /^[A-Z]{3}$/.test(code)&&Number.isFinite(rate)&&rate>0)&&
+    Number.isFinite(data.exchangeRates[data.currencyCode])&&data.exchangeRates[data.currencyCode]>0;
+}
+
+function applyRemoteSettings(data){
+  if(!catalogReady) return;
+  if(data){
+    if(data.theme) settings.theme=data.theme;
+    if('activeTripId' in data) activeTripId=data.activeTripId;
+    settings.homeCurrency=currencyCode;
+    applyTheme();
+    if(data.homeCurrency!==currencyCode){
+      Store.saveSettings({homeCurrency:currencyCode}).catch(handleErr);
+    }
+  } else if(currentUser){
+    settings.homeCurrency=currencyCode;
+    Store.saveSettings({theme:settings.theme,homeCurrency:currencyCode,activeTripId}).catch(handleErr);
+  }
+}
+
 function normalizeCurrencyData(){
-  if(currencyMigrationStarted || !storeReady) return;
+  if(currencyMigrationStarted || !storeReady || !catalogReady) return;
+  const ownedTrips=trips.filter(trip=>trip.ownerUid===currentUser?.uid);
+  const missingRate=ownedTrips.find(trip=>trip.currency&&trip.currency!==currencyCode&&
+    (!exchangeRates[trip.currency]||!exchangeRates[currencyCode]));
+  if(missingRate){
+    currencyMigrationStarted=true;
+    handleErr(new Error(`Shared catalog is missing an exchange rate for ${missingRate.currency}.`));
+    return;
+  }
   currencyMigrationStarted = true;
 
-  trips.forEach(trip=>{
-    const from = trip.currency || 'INR';
-    if(from === 'INR'){
-      if(trip.currency !== 'INR'){
-        trip.currency = 'INR';
+  ownedTrips.forEach(trip=>{
+    const from = trip.currency || currencyCode;
+    if(from === currencyCode){
+      if(trip.currency !== currencyCode){
+        trip.currency = currencyCode;
         Store.saveTrip(trip).catch(handleErr);
       }
       return;
     }
-    if(trip.budget) trip.budget = convert(trip.budget, from, 'INR');
-    trip.currency = 'INR';
+    if(trip.budget) trip.budget = convert(trip.budget, from, currencyCode);
+    trip.currency = currencyCode;
     Store.saveTrip(trip).catch(handleErr);
-    expenses.filter(expense=>expense.tripId===trip.id).forEach(expense=>{
-      expense.amount = convert(expense.amount, from, 'INR');
+    expenses.filter(expense=>expense.ownerUid===currentUser?.uid&&expense.tripId===trip.id).forEach(expense=>{
+      expense.amount = convert(expense.amount, from, currencyCode);
       delete expense.oc;
       delete expense.oa;
       Store.saveExpense(expense).catch(handleErr);
     });
   });
 
-  expenses.filter(expense=>expense.oc || expense.oa != null).forEach(expense=>{
+  expenses.filter(expense=>expense.ownerUid===currentUser?.uid&&(expense.oc || expense.oa != null)).forEach(expense=>{
     delete expense.oc;
     delete expense.oa;
     Store.saveExpense(expense).catch(handleErr);
@@ -153,7 +220,13 @@ function handleErr(err){
 function loginMsg(t){ const el=document.getElementById('loginMsg'); if(el) el.textContent=t; }
 function signIn(){
   loginMsg('Opening Google sign-in…');
-  auth.signInWithPopup(googleProvider).catch(showSignInErr);
+  auth.signInWithPopup(googleProvider).catch(err=>{
+    if(err.code==='auth/popup-blocked'||err.code==='auth/operation-not-supported-in-this-environment'){
+      loginMsg('Redirecting to Google sign-in…');
+      return auth.signInWithRedirect(googleProvider).catch(showSignInErr);
+    }
+    showSignInErr(err);
+  });
 }
 function showSignInErr(err){
   console.error('Sign-in error:', err);
@@ -204,8 +277,12 @@ async function joinPendingInvite(user){
 auth.onAuthStateChanged(user=>{
   if(user){
     currentUser=user;
+    CATS=[]; METHODS={}; CAT_ICONS=[]; CAT_COLORS=[];
+    currencyCode=''; currencySymbol=''; exchangeRates={}; catalogReady=false;
+    pendingSettings=null; settingsReceived=false; initialLoadErrorSource=null;
     currencyMigrationStarted=false;
     storeReady=false;
+    initialLoadError=false;
     pendingJoinedTripId=null;
     setAvatar(user);
     showApp();
@@ -214,7 +291,11 @@ auth.onAuthStateChanged(user=>{
     joinPendingInvite(user);
   } else {
     currentUser=null;
+    CATS=[]; METHODS={}; CAT_ICONS=[]; CAT_COLORS=[];
+    currencyCode=''; currencySymbol=''; exchangeRates={}; catalogReady=false;
+    pendingSettings=null; settingsReceived=false; initialLoadErrorSource=null;
     storeReady=false;
+    initialLoadError=false;
     currencyMigrationStarted=false;
     discoverable=false;
     collaborationInvites=[];
@@ -233,24 +314,31 @@ auth.getRedirectResult().catch(showSignInErr);
 
 /* ============ helpers ============ */
 const allCats = ()=> CATS.concat(customCats);
-const catOf = id => allCats().find(c=>c.id===id) || CATS.find(c=>c.id==='misc');
+const catOf = id => allCats().find(c=>c.id===id) || CATS[0];
 function convert(amt, from, to){
   if(from===to) return amt;
-  const rf=settings.rates[from]||DEF_RATES[from]||1;
-  const rt=settings.rates[to]||DEF_RATES[to]||1;
+  const rf=exchangeRates[from], rt=exchangeRates[to];
+  if(!Number.isFinite(rf)||rf<=0||!Number.isFinite(rt)||rt<=0){
+    throw new Error(`Shared catalog is missing exchange rates for ${from} or ${to}.`);
+  }
   return amt * rf / rt;
 }
 const getTrip = id => trips.find(t=>t.id===id);
 const tripExpenses = id => expenses.filter(e=>e.tripId===id)
   .sort((a,b)=> b.date.localeCompare(a.date) || (b.createdAt||0)-(a.createdAt||0));
 const spent = id => tripExpenses(id).reduce((s,e)=>s+e.amount,0);
-const sym = () => CUR.INR;
+const sym = () => currencySymbol;
+const currencyLabel = () => `${currencySymbol} ${currencyCode}`;
 function fmtNum(v){
   v = Math.round((v+Number.EPSILON)*100)/100;
   return v.toLocaleString(undefined,{minimumFractionDigits:(v%1?2:0),maximumFractionDigits:2});
 }
 function money(n, tripId){ return sym(tripId)+fmtNum(n); }
-const todayISO = ()=> new Date().toISOString().slice(0,10);
+const todayISO = ()=>{
+  const date=new Date();
+  date.setMinutes(date.getMinutes()-date.getTimezoneOffset());
+  return date.toISOString().slice(0,10);
+};
 function fmtDate(iso){
   const d=new Date(iso+'T00:00:00'); const t=new Date(todayISO()+'T00:00:00');
   const diff=Math.round((t-d)/864e5);
@@ -292,6 +380,14 @@ function setTab(tab){
 }
 /* ---- master render ---- */
 function render(){
+  if(initialLoadError){
+    const errorHtml=`<div class="empty"><div class="em"><i class="fa-solid fa-cloud-arrow-down"></i></div>
+      <h3>Could not load app data</h3><p>Check Firestore access and confirm the shared catalog exists, then try again.</p>
+      <div style="margin-top:20px"><button class="btn sm" style="margin:0 auto" onclick="retryDataSync()">Try again</button></div></div>`;
+    document.querySelectorAll('.screen').forEach(screen=>screen.innerHTML=errorHtml);
+    hideSplash();
+    return;
+  }
   const t = getTrip(activeTripId);
   const header = document.getElementById('header');
   const needsTrip = ['expenses','analysis','budget'].includes(currentTab);
@@ -299,7 +395,7 @@ function render(){
   if(currentTab==='trips'){
     document.getElementById('hTitle').textContent = greeting();
     document.getElementById('hSub').textContent = trips.length
-      ? trips.length+' trip'+(trips.length>1?'s':'')+' · ₹'+fmtNum(grandTotal())+' INR'
+      ? trips.length+' trip'+(trips.length>1?'s':'')+' · '+money(grandTotal())+' '+currencyCode
       : 'Let’s plan your first trip';
   } else if(t){
     document.getElementById('hTitle').textContent=t.name;
@@ -312,6 +408,12 @@ function render(){
   renderTrips();
   if(needsTrip && !t){ renderNoTrip(currentTab); return; }
   renderExpenses(); renderAnalysis(); renderBudget();
+}
+function retryDataSync(){
+  initialLoadError=false;
+  storeReady=false;
+  showApp();
+  Store.subscribe(onStoreData);
 }
 function greeting(){
   const h=new Date().getHours();
@@ -350,8 +452,8 @@ function renderTrips(){
   const grand = grandTotal();
   let h = inviteInbox + `<div class="grand"><div class="row between">
       <div><div class="lbl">Total across all trips</div>
-        <div class="val">₹${fmtNum(grand)}</div></div>
-      <div style="text-align:right"><div class="lbl">in INR</div>
+        <div class="val">${money(grand)}</div></div>
+      <div style="text-align:right"><div class="lbl">in ${currencyCode}</div>
         <div style="font-size:13px;margin-top:4px;font-weight:700">${trips.length} trip${trips.length>1?'s':''}</div></div>
     </div></div>
     <div class="row between" style="margin:2px 2px 6px">
@@ -369,7 +471,7 @@ function renderTrips(){
       <span class="accent"></span>
       <div class="row between"><h3>${esc(t.name)}</h3>
         <div class="row">${t.ownerUid===currentUser?.uid?`<button class="link" onclick="openInviteFromCard(event,'${t.id}')">Invite</button>`:''}
-        ${t.ownerUid!==currentUser?.uid?'<span class="pill">Shared</span>':''}<span class="pill">₹ INR</span></div></div>
+        ${t.ownerUid!==currentUser?.uid?'<span class="pill">Shared</span>':''}<span class="pill">${esc(currencyLabel())}</span></div></div>
       ${d? `<div class="small muted" style="padding-left:8px;margin-top:3px">
         <i class="fa-regular fa-calendar"></i> ${shortDate(t.startDate)} – ${shortDate(t.endDate)}
         · ${d.status==='upcoming'?'upcoming':d.status==='ended'?'ended':d.left+' day'+(d.left!==1?'s':'')+' left'}</div>`:''}
@@ -408,14 +510,15 @@ function renderExpenses(){
       <span class="dtot">${money(dtot,t.id)}</span></div>`;
     items.forEach(e=>{
       const c = catOf(e.category);
-      const m = METHODS[e.method]||METHODS.card;
+      const firstMethod=Object.values(METHODS)[0];
+      const m = METHODS[e.method]||{name:e.method||firstMethod.name,ic:firstMethod.ic};
       const lead = e.photo
         ? `<img class="thumb" src="${e.photo}" alt="">`
         : `<div class="cat-ic" style="background:${c.c}22;color:${c.c}">${icon(c.ic)}</div>`;
       h += `<div class="exp" onclick="openExpSheet('${e.id}')">
         ${lead}
         <div class="info"><div class="t">${esc(e.note)||c.name}</div>
-          <div class="d">${c.name} <span class="tag">${icon(m.ic)} ${m.name}</span></div></div>
+          <div class="d">${esc(c.name)} <span class="tag">${icon(m.ic)} ${esc(m.name)}</span></div></div>
         <div class="amt">${money(e.amount,t.id)}</div></div>`;
     });
     h += `</div>`;
@@ -460,7 +563,7 @@ function renderAnalysis(){
 
   h += `<div class="section-title">By category</div><div class="card">`;
   catRows.forEach(([cid,amt])=>{ const c=catOf(cid); const p=amt/sp*100;
-    h += `<div class="abar"><div class="top"><span>${icon(c.ic)} ${c.name}</span>
+    h += `<div class="abar"><div class="top"><span>${icon(c.ic)} ${esc(c.name)}</span>
         <span>${money(amt,t.id)} <span class="muted">${p.toFixed(0)}%</span></span></div>
       <div class="track"><span style="width:${(amt/maxCat*100)}%;background:${c.c}"></span></div></div>`;
   });
@@ -474,10 +577,10 @@ function renderAnalysis(){
   });
   h += `</div>`;
 
-  const mTot={}; list.forEach(e=>{ const k=e.method||'card'; mTot[k]=(mTot[k]||0)+e.amount; });
+  const mTot={}; list.forEach(e=>{ const k=e.method||Object.keys(METHODS)[0]; if(k) mTot[k]=(mTot[k]||0)+e.amount; });
   h += `<div class="section-title">By payment method</div><div class="card">`;
-  Object.entries(mTot).sort((a,b)=>b[1]-a[1]).forEach(([k,amt])=>{ const m=METHODS[k]||METHODS.other; const p=amt/sp*100;
-    h += `<div class="abar"><div class="top"><span>${icon(m.ic)} ${m.name}</span>
+  Object.entries(mTot).sort((a,b)=>b[1]-a[1]).forEach(([k,amt])=>{ const firstMethod=Object.values(METHODS)[0]; const m=METHODS[k]||{name:k,ic:firstMethod.ic}; const p=amt/sp*100;
+    h += `<div class="abar"><div class="top"><span>${icon(m.ic)} ${esc(m.name)}</span>
         <span>${money(amt,t.id)} <span class="muted">${p.toFixed(0)}%</span></span></div>
       <div class="track"><span style="width:${p}%;background:var(--primary-d)"></span></div></div>`;
   });
@@ -505,9 +608,11 @@ function computeSettle(t){
   tripExpenses(t.id).forEach(e=>{
     if(!e.paidBy || !e.participants || !e.participants.length) return;
     if(net[e.paidBy]==null) return;
+    const participants=[...new Set(e.participants.filter(id=>net[id]!=null))];
+    if(!participants.length) return;
     net[e.paidBy]+=e.amount;
-    const share=e.amount/e.participants.length;
-    e.participants.forEach(p=>{ if(net[p]!=null) net[p]-=share; });
+    const share=e.amount/participants.length;
+    participants.forEach(id=>{ net[id]-=share; });
   });
   const balances=trav.map(v=>({name:v.name, net:Math.round(net[v.id]*100)/100}));
   const cred=balances.filter(b=>b.net>0.005).map(b=>({...b})).sort((a,b)=>b.net-a.net);
@@ -829,9 +934,9 @@ function openTripSheet(id){
     <div class="field"><label>Trip name</label>
       <input id="f_name" placeholder="e.g. Bali Getaway" value="${t?esc(t.name):''}" maxlength="40"></div>
     <div class="grid2">
-      <div class="field"><label>Currency</label><div class="pill">₹ INR</div></div>
+      <div class="field"><label>Currency</label><div class="pill">${esc(currencyLabel())}</div></div>
       <div class="field"><label>Total budget (optional)</label>
-        <input id="f_budget" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="${t&&t.budget?t.budget:''}"></div>
+        <input id="f_budget" type="number" inputmode="decimal" min="0" max="1000000000000" step="any" placeholder="0" value="${t&&t.budget?t.budget:''}"></div>
     </div>
     <div class="grid2">
       <div class="field"><label>Start date</label>
@@ -845,27 +950,37 @@ function openTripSheet(id){
   renderTravelers();
   setTimeout(()=>{ const f=document.getElementById('f_name'); if(f) f.focus(); },260);
 }
-function saveTrip(id){
+async function saveTrip(id){
   const name=document.getElementById('f_name').value.trim();
-  const budget=parseFloat(document.getElementById('f_budget').value)||0;
+  const budgetInput=document.getElementById('f_budget').value;
+  const budget=budgetInput===''?0:Number(budgetInput);
   const startDate=document.getElementById('f_start').value||'';
   const endDate=document.getElementById('f_end').value||'';
   if(!name){ toast('Enter a trip name'); return; }
+  if(!Number.isFinite(budget)||budget<0||budget>1000000000000){ toast('Enter a budget between 0 and 1,000,000,000,000'); return; }
   if(startDate && endDate && endDate<startDate){ toast('End date is before start'); return; }
   const travelers=draftTravelers.filter(tv=>tv.name.trim()).map(tv=>({id:tv.id,name:tv.name.trim()}));
-  let t;
+  let trip;
   if(id){
-    t=getTrip(id); if(!t){ closeSheet(); return; }
-    Object.assign(t,{name,currency:'INR',budget,startDate,endDate,travelers});
-    toast('Trip updated');
+    const existing=getTrip(id); if(!existing){ closeSheet(); return; }
+    trip={...existing,name,currency:currencyCode,budget,startDate,endDate,travelers};
   } else {
-    t={id:uid(),ownerUid:currentUser.uid,name,currency:'INR',budget,startDate,endDate,travelers,createdAt:Date.now()};
-    trips.push(t); activeTripId=t.id;
-    Store.saveSettings({activeTripId:t.id}).catch(()=>{});
-    toast('Trip created');
+    trip={id:uid(),ownerUid:currentUser.uid,name,currency:currencyCode,budget,startDate,endDate,travelers,createdAt:Date.now()};
   }
-  Store.saveTrip(t).catch(handleErr);
-  closeSheet(); render();
+  try{
+    await Store.saveTrip(trip);
+    if(id) trips=trips.map(existing=>existing.id===id&&existing.ownerUid===trip.ownerUid?trip:existing);
+    else{
+      trips.push(trip);
+      activeTripId=trip.id;
+      Store.saveSettings({activeTripId:trip.id}).catch(handleErr);
+    }
+    closeSheet();
+    toast(id?'Trip updated':'Trip created');
+    render();
+  } catch(err){
+    handleErr(err);
+  }
 }
 /* --- Expense sheet --- */
 let draftPhoto=null, draftPart=[];
@@ -895,17 +1010,18 @@ function openExpSheet(id){
   const e = id? expenses.find(x=>x.id===id):null;
   draftPhoto = e&&e.photo? e.photo : null;
   const trav = t.travelers||[];
-  draftPart = e&&e.participants? e.participants.slice() : trav.map(v=>v.id);
-  const curCat = e?e.category:'food';
+  const travelerIds=new Set(trav.map(v=>v.id));
+  draftPart = e&&e.participants? [...new Set(e.participants.filter(id=>travelerIds.has(id)))]:trav.map(v=>v.id);
+  const curCat = e?e.category:CATS[0].id;
   const chips = allCats().map(c=>`<div class="chip ${c.id===curCat?'sel':''}" data-cat="${c.id}"
-      onclick="pickCat(this)">${icon(c.ic)} ${c.name}</div>`).join('');
-  const curMethod = e?e.method||'card':'card';
+      onclick="pickCat(this)">${icon(c.ic)} ${esc(c.name)}</div>`).join('');
+  const curMethod = e&&METHODS[e.method]?e.method:Object.keys(METHODS)[0];
   const mchips = Object.entries(METHODS).map(([k,m])=>`<div class="chip ${k===curMethod?'sel':''}" data-m="${k}"
-      onclick="pickMethod(this)">${icon(m.ic)} ${m.name}</div>`).join('');
+      onclick="pickMethod(this)">${icon(m.ic)} ${esc(m.name)}</div>`).join('');
   const curAmt = e? e.amount : '';
   let splitHtml='';
   if(trav.length){
-    const paid = e&&e.paidBy? e.paidBy : trav[0].id;
+    const paid = e&&trav.some(v=>v.id===e.paidBy)? e.paidBy : trav[0].id;
     const pchips = trav.map(v=>`<div class="chip ${v.id===paid?'sel':''}" data-p="${v.id}" onclick="pickPaidBy(this)">${esc(v.name)}</div>`).join('');
     const partChips = trav.map(v=>`<div class="chip ${draftPart.includes(v.id)?'sel':''}" data-pt="${v.id}" onclick="togglePart(this)">${esc(v.name)}</div>`).join('');
     splitHtml = `<div class="field"><label>Paid by</label><div class="chips" id="f_paid">${pchips}</div>
@@ -915,8 +1031,8 @@ function openExpSheet(id){
   openSheet(`<h2>${e?'Edit expense':'Add expense'}</h2>
     <div class="grid2">
       <div class="field"><label>Amount</label>
-        <input id="f_amt" type="number" inputmode="decimal" min="0" step="any" placeholder="0.00" value="${curAmt}"></div>
-      <div class="field"><label>Currency</label><div class="pill">₹ INR</div></div>
+        <input id="f_amt" type="number" inputmode="decimal" min="0" max="1000000000000" step="any" placeholder="0.00" value="${curAmt}"></div>
+      <div class="field"><label>Currency</label><div class="pill">${esc(currencyLabel())}</div></div>
     </div>
     <div class="field"><label>Category</label><div class="chips" id="f_cats">${chips}</div>
       <input type="hidden" id="f_cat" value="${curCat}"></div>
@@ -941,35 +1057,52 @@ function pickPaidBy(el){ document.querySelectorAll('#f_paid .chip').forEach(c=>c
   el.classList.add('sel'); document.getElementById('f_paidv').value=el.dataset.p; }
 function togglePart(el){ el.classList.toggle('sel');
   const id=el.dataset.pt; if(draftPart.includes(id)) draftPart=draftPart.filter(x=>x!==id); else draftPart.push(id); }
-function saveExp(id){
+async function saveExp(id){
   const t=getTrip(activeTripId); if(!t) return;
   const raw=parseFloat(document.getElementById('f_amt').value);
   const cat=document.getElementById('f_cat').value;
   const method=document.getElementById('f_method').value;
   const note=document.getElementById('f_note').value.trim();
   const date=document.getElementById('f_date').value||todayISO();
-  if(!raw||raw<=0){ toast('Enter a valid amount'); return; }
+  if(!Number.isFinite(raw)||raw<=0||raw>1000000000000){ toast('Enter an amount greater than 0 and at most 1,000,000,000,000'); return; }
+  if(date>todayISO()){ toast('Expense date cannot be in the future'); return; }
   const rec={ownerUid:t.ownerUid,amount:raw, category:cat, method, note, date, photo:draftPhoto||null};
   if((t.travelers||[]).length){
+    if(!draftPart.length){ toast('Select at least one traveler for the split'); return; }
     rec.paidBy=document.getElementById('f_paidv').value;
-    rec.participants=draftPart.length?draftPart.slice():(t.travelers.map(v=>v.id));
+    rec.participants=draftPart.slice();
   } else { rec.paidBy=null; rec.participants=null; }
-  let e;
+  let expense;
   if(id){
-    e=expenses.find(x=>x.id===id); if(!e){ closeSheet(); return; }
-    Object.assign(e,rec); toast('Expense updated');
+    const existing=expenses.find(x=>x.id===id); if(!existing){ closeSheet(); return; }
+    expense={...existing,...rec};
   } else {
-    e=Object.assign({id:uid(),tripId:activeTripId,createdAt:Date.now()},rec);
-    expenses.push(e); toast('Expense added');
+    expense={id:uid(),tripId:activeTripId,createdAt:Date.now(),...rec};
   }
-  Store.saveExpense(e).catch(handleErr);
-  closeSheet(); render();
+  try{
+    await Store.saveExpense(expense);
+    if(id) expenses=expenses.map(existing=>existing.id===id?expense:existing);
+    else expenses.push(expense);
+    closeSheet();
+    toast(id?'Expense updated':'Expense added');
+    render();
+  } catch(err){
+    handleErr(err);
+  }
 }
-function deleteExp(id){
+async function deleteExp(id){
   const expense=expenses.find(item=>item.id===id);
-  expenses=expenses.filter(x=>x.id!==id);
-  Store.deleteExpense(id,expense?.ownerUid||currentUser.uid).catch(handleErr);
-  closeSheet(); toast('Expense deleted'); render();
+  if(!expense) return;
+  if(!confirm('Delete this expense? This cannot be undone.')) return;
+  try{
+    await Store.deleteExpense(id,expense.ownerUid||currentUser.uid);
+    expenses=expenses.filter(item=>item.id!==id);
+    closeSheet();
+    toast('Expense deleted');
+    render();
+  } catch(err){
+    handleErr(err);
+  }
 }
 
 /* --- Budget sheet --- */
@@ -977,16 +1110,24 @@ function openBudgetSheet(){
   const t=getTrip(activeTripId); if(!t) return;
   openSheet(`<h2>Trip budget</h2>
     <div class="field"><label>Total budget (${sym(t.id)})</label>
-      <input id="f_budget2" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="${t.budget||''}"></div>
+      <input id="f_budget2" type="number" inputmode="decimal" min="0" max="1000000000000" step="any" placeholder="0" value="${t.budget||''}"></div>
     <p class="small muted" style="margin-bottom:16px">Set to 0 or leave empty to remove the budget.</p>
     <button class="btn" onclick="saveBudget()">Save budget</button>`);
   setTimeout(()=>{ const f=document.getElementById('f_budget2'); if(f) f.focus(); },260);
 }
-function saveBudget(){
+async function saveBudget(){
   const t=getTrip(activeTripId); if(!t) return;
-  t.budget=parseFloat(document.getElementById('f_budget2').value)||0;
-  Store.saveTrip(t).catch(handleErr);
-  closeSheet(); toast('Budget saved'); render();
+  const value=document.getElementById('f_budget2').value;
+  const budget=value===''?0:Number(value);
+  if(!Number.isFinite(budget)||budget<0||budget>1000000000000){ toast('Enter a budget between 0 and 1,000,000,000,000'); return; }
+  const updated={...t,budget};
+  try{
+    await Store.saveTrip(updated);
+    trips=trips.map(existing=>existing.id===t.id&&existing.ownerUid===t.ownerUid?updated:existing);
+    closeSheet(); toast('Budget saved'); render();
+  } catch(err){
+    handleErr(err);
+  }
 }
 
 /* --- Delete trip --- */
@@ -997,13 +1138,17 @@ function confirmDeleteTrip(id){
     <button class="btn danger" onclick="deleteTrip('${id}')">Delete trip</button>
     <button class="btn ghost" style="margin-top:10px" onclick="closeSheet()">Cancel</button>`);
 }
-function deleteTrip(id){
+async function deleteTrip(id){
   const trip=getTrip(id);
   if(!trip) return;
-  const expIds=expenses.filter(e=>e.tripId===id).map(e=>e.id);
-  trips=trips.filter(t=>t.id!==id);
-  expenses=expenses.filter(e=>e.tripId!==id);
-  Store.deleteTripCascade(id,expIds,trip.ownerUid,trip.inviteId).catch(handleErr);
+  try{
+    await Store.deleteTripCascade(id,trip.ownerUid,trip.inviteId);
+  } catch(err){
+    handleErr(err);
+    return;
+  }
+  trips=trips.filter(item=>item.id!==id||item.ownerUid!==trip.ownerUid);
+  expenses=expenses.filter(item=>item.tripId!==id||item.ownerUid!==trip.ownerUid);
   if(activeTripId===id){ activeTripId = trips.length? trips[0].id:null;
     Store.saveSettings({activeTripId}).catch(()=>{}); }
   closeSheet(); toast('Trip deleted'); setTab('trips');
@@ -1064,17 +1209,12 @@ function openSettings(){
       <button class="btn ghost" onclick="toggleDiscoverable()">${discoverable?icon('fa-solid fa-eye-slash')+' Remove my name from search':icon('fa-solid fa-magnifying-glass')+' Make my name searchable'}</button>
       <div class="small muted" style="margin-top:8px">Only your Google display name is searchable. Your email and trip data stay private.</div></div>
     ${installBtnHtml()}
-    <div class="field"><label>Currency</label><div class="pill">₹ INR</div></div>
+    <div class="field"><label>Currency</label><div class="pill">${esc(currencyLabel())}</div></div>
     <div class="field"><label>Custom categories</label>${catList}
       <button class="btn ghost sm" style="margin-top:10px" onclick="openCatSheet()">${icon('fa-solid fa-plus')} Add category</button></div>
     <button class="btn" onclick="closeSheet()">Done</button>`);
 }
 /* --- Custom category sheet --- */
-const CAT_ICONS=['fa-solid fa-plane','fa-solid fa-gift','fa-solid fa-mug-hot','fa-solid fa-gas-pump',
-  'fa-solid fa-ticket','fa-solid fa-camera','fa-solid fa-wine-glass','fa-solid fa-gamepad',
-  'fa-solid fa-book','fa-solid fa-heart','fa-solid fa-star','fa-solid fa-dumbbell',
-  'fa-solid fa-spa','fa-solid fa-train','fa-solid fa-ship','fa-solid fa-paw'];
-const CAT_COLORS=['#ef4444','#f97316','#f59e0b','#84cc16','#10b981','#14b8a6','#06b6d4','#3b82f6','#8b5cf6','#ec4899'];
 let draftCatIcon, draftCatColor;
 function catPickers(){
   const ib=document.getElementById('f_caticons'), cb=document.getElementById('f_catcolors');
@@ -1083,7 +1223,7 @@ function catPickers(){
 }
 function openCatSheet(id){
   const c=id?customCats.find(x=>x.id===id):null;
-  draftCatIcon=c?c.ic:CAT_ICONS[0]; draftCatColor=c?c.c:CAT_COLORS[7];
+  draftCatIcon=c?c.ic:CAT_ICONS[0]; draftCatColor=c?c.c:CAT_COLORS[0];
   openSheet(`<h2>${c?'Edit category':'New category'}</h2>
     <div class="field"><label>Name</label>
       <input id="f_catname" placeholder="e.g. Souvenirs" value="${c?esc(c.name):''}" maxlength="24"></div>

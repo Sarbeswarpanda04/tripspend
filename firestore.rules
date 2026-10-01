@@ -7,7 +7,7 @@ rules_version = '2';
 // users/{uid}/trips/{tripId}
 //   Required: id (string, immutable and equal to document ID),
 //     ownerUid (string, immutable and equal to uid), name (1-40 chars),
-//     currency ("INR"), budget (0..1e12), createdAt (milliseconds since
+//     currency (shared catalog currency code), budget (0..1e12), createdAt (milliseconds since
 //     epoch, immutable).
 //   Optional: startDate/endDate (YYYY-MM-DD or empty string),
 //     travelers (up to 10 {id,name} maps), inviteId (null or invite ID).
@@ -16,15 +16,14 @@ rules_version = '2';
 //   Required: id (string, immutable and equal to document ID),
 //     ownerUid (string, immutable and equal to uid), tripId (immutable ID
 //     of a trip owned by uid), amount (>0 and <=1e12), category (1-40
-//     chars), method (card/cash/other), note (up to 60 chars), date
+//     chars), method (shared catalog key), note (up to 60 chars), date
 //     (YYYY-MM-DD), createdAt (milliseconds since epoch, immutable).
 //   Optional: photo (null or bounded JPEG data URL), paidBy (null or ID),
 //     participants (null or a list of up to 10 IDs).
 //
 // users/{uid}/meta/settings
-//   Optional fields only: theme (light/dark), homeCurrency (INR),
-//     rates (map of supported currency codes to positive numbers),
-//     activeTripId (null or ID).
+//   Optional fields only: theme (light/dark), homeCurrency (shared catalog currency),
+//     optional legacy rates map, activeTripId (null or ID).
 //
 // users/{uid}/meta/cats
 //   Required: list (up to 10 custom category maps containing id, name,
@@ -44,6 +43,11 @@ rules_version = '2';
 // userDirectory/{uid}
 //   Opt-in public search record: uid, Google displayName, lowercase
 //   searchName, and updatedAt. Email and trip data are never listed.
+//
+// appConfig/catalog
+//   Admin-managed shared catalog: currencyCode, currencySymbol,
+//   exchangeRates, categories, categoryIcons, categoryColors, and
+//   paymentMethods. Signed-in clients can read but never write it.
 //
 // collaborationInvites/{inviteId}
 //   Targeted invite: ownerUid, ownerName, inviteeUid, tripId, tripName,
@@ -93,6 +97,22 @@ function validOptionalInviteId(data) {
     validId(data.inviteId);
 }
 
+function appCatalogPath() {
+  return /databases/$(database)/documents/appConfig/catalog;
+}
+
+function isConfiguredCurrency(value) {
+  return value is string &&
+    exists(appCatalogPath()) &&
+    get(appCatalogPath()).data.currencyCode == value;
+}
+
+function isConfiguredPaymentMethod(value) {
+  return value is string &&
+    exists(appCatalogPath()) &&
+    value in get(appCatalogPath()).data.paymentMethods.keys();
+}
+
 function isTripMember(ownerUid, tripId) {
   return signedIn() &&
     exists(/databases/$(database)/documents/tripShares/$(ownerUid)/trips/$(tripId)/members/$(request.auth.uid));
@@ -140,7 +160,7 @@ function validTrip(data, ownerUid, tripId) {
     data.name is string &&
     data.name.size() >= 1 &&
     data.name.size() <= 40 &&
-    data.currency == 'INR' &&
+    isConfiguredCurrency(data.currency) &&
     data.budget is number &&
     data.budget >= 0 &&
     data.budget <= 1000000000000 &&
@@ -243,7 +263,7 @@ function validExpense(data, ownerUid, expenseId) {
     data.category is string &&
     data.category.size() >= 1 &&
     data.category.size() <= 40 &&
-    data.method in ['card', 'cash', 'other'] &&
+    isConfiguredPaymentMethod(data.method) &&
     data.note is string &&
     data.note.size() <= 60 &&
     data.date is string &&
@@ -271,23 +291,16 @@ function validExpenseUpdate(ownerUid, expenseId) {
 
 function validRateMap(rates) {
   return rates is map &&
-    rates.keys().hasOnly(['USD', 'EUR', 'GBP', 'INR', 'JPY', 'AUD', 'CAD', 'AED', 'SGD']) &&
-    (!('USD' in rates) || (rates.USD is number && rates.USD > 0 && rates.USD <= 1000000)) &&
-    (!('EUR' in rates) || (rates.EUR is number && rates.EUR > 0 && rates.EUR <= 1000000)) &&
-    (!('GBP' in rates) || (rates.GBP is number && rates.GBP > 0 && rates.GBP <= 1000000)) &&
-    (!('INR' in rates) || (rates.INR is number && rates.INR > 0 && rates.INR <= 1000000)) &&
-    (!('JPY' in rates) || (rates.JPY is number && rates.JPY > 0 && rates.JPY <= 1000000)) &&
-    (!('AUD' in rates) || (rates.AUD is number && rates.AUD > 0 && rates.AUD <= 1000000)) &&
-    (!('CAD' in rates) || (rates.CAD is number && rates.CAD > 0 && rates.CAD <= 1000000)) &&
-    (!('AED' in rates) || (rates.AED is number && rates.AED > 0 && rates.AED <= 1000000)) &&
-    (!('SGD' in rates) || (rates.SGD is number && rates.SGD > 0 && rates.SGD <= 1000000));
+    exists(appCatalogPath()) &&
+    rates.keys().size() <= 20 &&
+    rates.keys().hasOnly(get(appCatalogPath()).data.exchangeRates.keys());
 }
 
 function validSettings(data) {
   return data is map &&
     data.keys().hasOnly(['theme', 'homeCurrency', 'rates', 'activeTripId']) &&
     (!('theme' in data) || data.theme in ['light', 'dark']) &&
-    (!('homeCurrency' in data) || data.homeCurrency == 'INR') &&
+    (!('homeCurrency' in data) || isConfiguredCurrency(data.homeCurrency)) &&
     (!('rates' in data) || validRateMap(data.rates)) &&
     (!('activeTripId' in data) || data.activeTripId == null || validId(data.activeTripId));
 }
@@ -305,8 +318,7 @@ function validCategory(item) {
     item.name.size() >= 1 &&
     item.name.size() <= 24 &&
     item.ic is string &&
-    item.ic.size() >= 1 &&
-    item.ic.size() <= 80 &&
+    item.ic.matches('^[A-Za-z0-9 -]{1,80}$') &&
     validHexColor(item.c) &&
     item.custom == true;
 }
@@ -419,6 +431,15 @@ function pairedMemberRecordExists(ownerUid, tripId, memberUid, inviteId) {
     getAfter(member).data.inviteId == inviteId;
 }
 
+function canReadOwnerJoinedTrip(memberUid, membershipId) {
+  let parts = membershipId.split('_');
+  return signedIn() &&
+    parts.size() == 2 &&
+    parts[0] == request.auth.uid &&
+    validId(parts[1]) &&
+    exists(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(parts[1])/members/$(memberUid));
+}
+
 function validJoinedTrip(data, membershipId, memberUid) {
   return data is map &&
     data.keys().hasAll(['ownerUid', 'tripId', 'inviteId', 'joinedAt']) &&
@@ -502,6 +523,11 @@ function validCollaborationInviteAcceptance(inviteId) {
 // Database Rules — default deny
 // ===============================================================
 
+    match /appConfig/{documentId} {
+      allow get: if signedIn() && documentId == 'catalog';
+      allow list, write: if false;
+    }
+
     match /userDirectory/{userId} {
       // Directory records contain only opted-in public display names.
       allow get: if signedIn();
@@ -563,9 +589,9 @@ function validCollaborationInviteAcceptance(inviteId) {
 
       match /joinedTrips/{membershipId} {
         allow get: if isOwner(userId) ||
+          canReadOwnerJoinedTrip(userId, membershipId) ||
           (signedIn() && resource.data.ownerUid == request.auth.uid &&
-            membershipId == request.auth.uid + '_' + resource.data.tripId &&
-            exists(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(resource.data.tripId)/members/$(userId)));
+            membershipId == request.auth.uid + '_' + resource.data.tripId);
         allow list: if isOwner(userId);
         allow create: if isOwner(userId) &&
           validJoinedTrip(request.resource.data, membershipId, userId);
@@ -578,7 +604,9 @@ function validCollaborationInviteAcceptance(inviteId) {
     match /tripInvites/{inviteId} {
       // An invite ID is a bearer secret. Require authentication and allow
       // direct get only; listing invites is never allowed.
-      allow get: if signedIn() && resource.data.active == true;
+      allow get: if signedIn() &&
+        (!exists(activeInvitePath(inviteId)) || resource.data.active == true ||
+          resource.data.ownerUid == request.auth.uid);
 
       allow create: if signedIn() &&
         request.resource.data.ownerUid == request.auth.uid &&
@@ -663,7 +691,10 @@ function validCollaborationInviteAcceptance(inviteId) {
             /databases/$(database)/documents/users/$(request.auth.uid)/trips/$(resource.data.tripId)
           ) ||
           (
-            exists(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(resource.data.tripId)/members/$(resource.data.inviteeUid)) &&
+            (
+              exists(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(resource.data.tripId)/members/$(resource.data.inviteeUid)) ||
+              exists(/databases/$(database)/documents/users/$(resource.data.inviteeUid)/joinedTrips/$(request.auth.uid + '_' + resource.data.tripId))
+            ) &&
             !existsAfter(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(resource.data.tripId)/members/$(resource.data.inviteeUid)) &&
             !existsAfter(/databases/$(database)/documents/users/$(resource.data.inviteeUid)/joinedTrips/$(request.auth.uid + '_' + resource.data.tripId))
           )

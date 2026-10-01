@@ -1,10 +1,10 @@
 /* TripSpend service worker — offline app shell.
    App data lives in Firestore's IndexedDB cache, not here. */
-const CACHE = 'tripspend-v7';
+const CACHE = 'tripspend-v12';
 const ASSETS = [
-  './', './index.html', './manifest.webmanifest', './icon.svg',
-  './css/styles.css',
-  './js/firebase-config.js', './js/store.js', './js/app.js'
+  './?v=12', './index.html?v=12', './manifest.webmanifest?v=12', './icon.svg?v=12',
+  './css/styles.css?v=12',
+  './js/firebase-config.js?v=12', './js/store.js?v=12', './js/app.js?v=12'
 ];
 
 self.addEventListener('install', e => {
@@ -32,7 +32,7 @@ self.addEventListener('fetch', e => {
   // Never intercept Firebase/Google API calls — let them hit the network.
   if (/googleapis\.com|firebaseio\.com|firebasestorage|identitytoolkit|firebaseinstallations/.test(url)) return;
   e.respondWith(
-    caches.match(req).then(cached => cached || fetch(req).then(res => {
+    caches.match(req, {ignoreSearch:true}).then(cached => cached || fetch(req).then(res => {
       const copy = res.clone();
       if (res.ok && RUNTIME_OK(url)) {
         caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
