@@ -314,8 +314,9 @@ const Store = (() => {
           displayName:firebase.auth().currentUser?.displayName||'Trip traveler',
           photoURL:firebase.auth().currentUser?.photoURL||null
         };
+        const joinedMembership={ownerUid,tripId,inviteId,joinedAt:membership.joinedAt};
         if(!memberDoc.exists) transaction.set(memberRef,{uid,...membership});
-        if(!joinedDoc.exists) transaction.set(joinedRef,membership);
+        if(!joinedDoc.exists) transaction.set(joinedRef,joinedMembership);
         return {ownerUid,tripId,tripName:invite.tripName};
       });
     },
@@ -390,17 +391,15 @@ const Store = (() => {
           transaction.get(memberRef),
           transaction.get(joinedRef)
         ]);
-        if(memberDoc.exists || joinedDoc.exists){
-          if(memberDoc.exists!==joinedDoc.exists){
-            throw new Error('This invite has incomplete trip access records. Ask the trip owner to remove your existing access and send a new invite.');
-          }
-          if(memberDoc.exists && joinedDoc.exists){
-            transaction.update(inviteRef,{
-              status:'accepted',
-              respondedAt:firebase.firestore.FieldValue.serverTimestamp()
-            });
-          }
-          return {alreadyMember:true,ownerUid:invite.ownerUid,tripId:invite.tripId,tripName:invite.tripName};
+        const existingMember=memberDoc.exists?memberDoc.data():null;
+        const existingJoined=joinedDoc.exists?joinedDoc.data():null;
+        const recordsMatch=record=>!record||(
+          record.ownerUid===invite.ownerUid&&
+          record.tripId===invite.tripId&&
+          record.inviteId===inviteId
+        );
+        if(!recordsMatch(existingMember)||!recordsMatch(existingJoined)){
+          throw new Error('Existing trip access records do not match this invite. Ask the trip owner to remove your existing access and send a new invite.');
         }
         const membership={
           ownerUid:invite.ownerUid,
@@ -410,13 +409,25 @@ const Store = (() => {
           displayName:firebase.auth().currentUser?.displayName||'Trip traveler',
           photoURL:firebase.auth().currentUser?.photoURL||null
         };
+        const joinedMembership={
+          ownerUid:invite.ownerUid,
+          tripId:invite.tripId,
+          inviteId,
+          joinedAt:membership.joinedAt
+        };
         transaction.update(inviteRef,{
           status:'accepted',
           respondedAt:firebase.firestore.FieldValue.serverTimestamp()
         });
-        transaction.set(memberRef,{uid,...membership});
-        transaction.set(joinedRef,membership);
-        return {ownerUid:invite.ownerUid,tripId:invite.tripId,tripName:invite.tripName};
+        if(!memberDoc.exists) transaction.set(memberRef,{uid,...membership});
+        if(!joinedDoc.exists) transaction.set(joinedRef,joinedMembership);
+        return {
+          ownerUid:invite.ownerUid,
+          tripId:invite.tripId,
+          tripName:invite.tripName,
+          alreadyMember:memberDoc.exists&&joinedDoc.exists,
+          repairedMembership:memberDoc.exists!==joinedDoc.exists
+        };
       });
     },
 
