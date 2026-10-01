@@ -398,9 +398,7 @@ function validMember(data, ownerUid, tripId, memberUid) {
 }
 
 function tripOwnerRemovingMember(ownerUid, tripId, memberUid) {
-  let joined = /databases/$(database)/documents/users/$(memberUid)/joinedTrips/$(ownerUid + '_' + tripId);
-  return signedIn() && request.auth.uid == ownerUid &&
-    exists(joined) && !existsAfter(joined);
+  return signedIn() && request.auth.uid == ownerUid;
 }
 
 function pairedJoinedRecordExists(ownerUid, tripId, memberUid, inviteId) {
@@ -572,9 +570,7 @@ function validCollaborationInviteAcceptance(inviteId) {
         allow create: if isOwner(userId) &&
           validJoinedTrip(request.resource.data, membershipId, userId);
         allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid &&
-            membershipId == request.auth.uid + '_' + resource.data.tripId &&
-            exists(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(resource.data.tripId)/members/$(userId)) &&
-            !existsAfter(/databases/$(database)/documents/tripShares/$(request.auth.uid)/trips/$(resource.data.tripId)/members/$(userId));
+          membershipId == request.auth.uid + '_' + resource.data.tripId;
         allow update: if false;
       }
     }

@@ -366,9 +366,9 @@ const Store = (() => {
           transaction.get(joinedRef),
           transaction.get(inviteRef)
         ]);
-        if(!memberDoc.exists || !joinedDoc.exists) return false;
-        transaction.delete(memberRef);
-        transaction.delete(joinedRef);
+        if(!memberDoc.exists && !joinedDoc.exists) return false;
+        if(memberDoc.exists) transaction.delete(memberRef);
+        if(joinedDoc.exists) transaction.delete(joinedRef);
         if(inviteDoc.exists) transaction.delete(inviteRef);
         return true;
       });
