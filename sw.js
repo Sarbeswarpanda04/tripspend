@@ -1,10 +1,10 @@
 /* TripSpend service worker — offline app shell.
    App data lives in Firestore's IndexedDB cache, not here. */
-const CACHE = 'tripspend-v12';
+const CACHE = 'tripspend-v14';
 const ASSETS = [
-  './?v=12', './index.html?v=12', './manifest.webmanifest?v=12', './icon.svg?v=12',
-  './css/styles.css?v=12',
-  './js/firebase-config.js?v=12', './js/store.js?v=12', './js/app.js?v=12'
+  './?v=14', './index.html?v=14', './manifest.webmanifest?v=14', './icon.svg?v=14',
+  './css/styles.css?v=14',
+  './js/firebase-config.js?v=14', './js/store.js?v=14', './js/app.js?v=14'
 ];
 
 self.addEventListener('install', e => {

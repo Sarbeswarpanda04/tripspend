@@ -140,6 +140,16 @@ function isValidCatalog(data){
       category&&typeof category.id==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(category.id)&&
       typeof category.name==='string'&&category.name.length>0&&category.name.length<=40&&
       validIcon(category.ic)&&typeof category.c==='string'&&/^#[0-9A-Fa-f]{6}$/.test(category.c))&&
+    Array.isArray(data.categoryIds)&&data.categoryIds.length===data.categories.length&&
+      data.categoryIds.every(id=>data.categories.some(category=>category.id===id))&&
+    data.subcategoriesByCategory&&typeof data.subcategoriesByCategory==='object'&&
+      Object.entries(data.subcategoriesByCategory).every(([categoryId,ids])=>
+        data.categoryIds.includes(categoryId)&&Array.isArray(ids)&&ids.every(id=>
+          data.categories.find(category=>category.id===categoryId)?.subcategories?.some(subcategory=>subcategory.id===id)))&&
+    data.categories.every(category=>!category.subcategories||
+      category.subcategories.every(subcategory=>subcategory&&typeof subcategory.id==='string'&&
+        /^[A-Za-z0-9_-]{1,40}$/.test(subcategory.id)&&typeof subcategory.name==='string'&&
+        subcategory.name.length>0&&subcategory.name.length<=40))&&
     Array.isArray(data.categoryIcons)&&data.categoryIcons.length>0&&data.categoryIcons.every(validIcon)&&
     Array.isArray(data.categoryColors)&&data.categoryColors.length>0&&data.categoryColors.every(color=>
       typeof color==='string'&&/^#[0-9A-Fa-f]{6}$/.test(color))&&
@@ -325,7 +335,7 @@ function convert(amt, from, to){
 }
 const getTrip = id => trips.find(t=>t.id===id);
 const tripExpenses = id => expenses.filter(e=>e.tripId===id)
-  .sort((a,b)=> b.date.localeCompare(a.date) || (b.createdAt||0)-(a.createdAt||0));
+  .sort((a,b)=> b.date.localeCompare(a.date) || (b.time||'').localeCompare(a.time||'') || (b.createdAt||0)-(a.createdAt||0));
 const spent = id => tripExpenses(id).reduce((s,e)=>s+e.amount,0);
 const sym = () => currencySymbol;
 const currencyLabel = () => `${currencySymbol} ${currencyCode}`;
@@ -339,6 +349,7 @@ const todayISO = ()=>{
   date.setMinutes(date.getMinutes()-date.getTimezoneOffset());
   return date.toISOString().slice(0,10);
 };
+const currentTime = ()=>new Date().toTimeString().slice(0,5);
 function fmtDate(iso){
   const d=new Date(iso+'T00:00:00'); const t=new Date(todayISO()+'T00:00:00');
   const diff=Math.round((t-d)/864e5);
@@ -512,13 +523,16 @@ function renderExpenses(){
       const c = catOf(e.category);
       const firstMethod=Object.values(METHODS)[0];
       const m = METHODS[e.method]||{name:e.method||firstMethod.name,ic:firstMethod.ic};
+      const category=CATS.find(item=>item.id===e.category);
+      const subcategory=category?.subcategories?.find(item=>item.id===e.subCategory)?.name||e.subCategory;
       const lead = e.photo
         ? `<img class="thumb" src="${e.photo}" alt="">`
         : `<div class="cat-ic" style="background:${c.c}22;color:${c.c}">${icon(c.ic)}</div>`;
       h += `<div class="exp" onclick="openExpSheet('${e.id}')">
         ${lead}
-        <div class="info"><div class="t">${esc(e.note)||c.name}</div>
-          <div class="d">${esc(c.name)} <span class="tag">${icon(m.ic)} ${esc(m.name)}</span></div></div>
+        <div class="info"><div class="t">${esc(e.note)||esc(c.name)}</div>
+          <div class="d">${esc(c.name)}${subcategory?` · ${esc(subcategory)}`:''}${e.time?` · ${esc(e.time)}`:''}
+            <span class="tag">${icon(m.ic)} ${esc(m.name)}</span></div></div>
         <div class="amt">${money(e.amount,t.id)}</div></div>`;
     });
     h += `</div>`;
@@ -914,22 +928,74 @@ async function revokeTripInvite(id){
 
 /* --- Trip sheet --- */
 let draftTravelers = [];
+let draftCollaborators = new Map();
+let travelerSearchTimer = null;
+let travelerSearchRun = 0;
 function renderTravelers(){
   const box=document.getElementById('f_travelers'); if(!box) return;
-  box.innerHTML = draftTravelers.map((tv,i)=>`<div class="row" style="gap:8px;margin-bottom:8px">
-      <input value="${esc(tv.name)}" placeholder="Traveler ${i+1}" oninput="draftTravelers[${i}].name=this.value" maxlength="24">
-      <button class="hbtn" style="background:var(--surface2);color:var(--red);flex:0 0 auto" onclick="removeTraveler(${i})"><i class="fa-solid fa-xmark"></i></button>
+  box.innerHTML = draftTravelers.map((traveler,index)=>`<div class="row" style="gap:8px;margin-bottom:8px">
+      <div style="flex:1;min-width:0"><input value="${esc(traveler.name)}" placeholder="Traveler ${index+1}" oninput="draftTravelers[${index}].name=this.value" maxlength="24">
+      ${draftCollaborators.has(traveler.id)?'<div class="small muted" style="margin:4px 2px 0">Collaborator invite after saving</div>':''}</div>
+      <button class="hbtn" aria-label="Remove traveler" style="background:var(--surface2);color:var(--red);flex:0 0 auto" onclick="removeTraveler(${index})"><i class="fa-solid fa-xmark"></i></button>
     </div>`).join('') +
-    `<button class="btn ghost sm" onclick="addTraveler()">${icon('fa-solid fa-user-plus')} Add traveler</button>`;
+    `<button class="btn ghost sm" onclick="addTraveler()">${icon('fa-solid fa-user-plus')} Add traveler by name</button>`;
 }
 function addTraveler(){
   if(draftTravelers.length>=10){ toast('A trip can have up to 10 travelers'); return; }
   draftTravelers.push({id:uid(),name:''}); renderTravelers();
 }
-function removeTraveler(i){ draftTravelers.splice(i,1); renderTravelers(); }
+function removeTraveler(i){
+  const [removed]=draftTravelers.splice(i,1);
+  if(removed) draftCollaborators.delete(removed.id);
+  renderTravelers();
+}
+function searchTripCollaborators(term){
+  clearTimeout(travelerSearchTimer);
+  const run=++travelerSearchRun;
+  const box=document.getElementById('travelerSearchResults');
+  if(!box) return;
+  const prefix=(term||'').trim();
+  if(prefix.length<2){ box.className='small muted'; box.textContent='Search available TripSpend users by name.'; return; }
+  box.className='small muted'; box.textContent='Searching…';
+  travelerSearchTimer=setTimeout(async()=>{
+    try{
+      const users=await Store.searchUsers(prefix);
+      if(run!==travelerSearchRun) return;
+      const available=users.filter(user=>![...draftCollaborators.values()].includes(user.uid));
+      if(!available.length){ box.innerHTML='<span>No available user found. Add them by name as a traveler instead.</span>'; return; }
+      box.className='';
+      box.innerHTML=available.map(user=>`<div class="row between" style="gap:10px;padding:8px 0;border-bottom:1px solid var(--line)">
+        <span>${esc(user.displayName)}</span><button class="btn sm ghost" data-add-collaborator="${esc(user.uid)}">Add</button></div>`).join('');
+      box.querySelectorAll('[data-add-collaborator]').forEach(button=>button.addEventListener('click',()=>{
+        const user=available.find(item=>item.uid===button.dataset.addCollaborator);
+        if(user) addCollaboratorTraveler(user);
+      }));
+    } catch(err){
+      if(run!==travelerSearchRun) return;
+      console.error('Trip collaborator search error:',err);
+      box.className='small muted';
+      box.textContent='Could not search users. You can add this person by name as a traveler.';
+    }
+  },250);
+}
+function addCollaboratorTraveler(user){
+  if(draftTravelers.length>=10){ toast('A trip can have up to 10 travelers'); return; }
+  if([...draftCollaborators.values()].includes(user.uid)) return;
+  const traveler={id:uid(),name:(user.displayName||'Traveler').trim().slice(0,24)};
+  draftTravelers.push(traveler);
+  draftCollaborators.set(traveler.id,user.uid);
+  const search=document.getElementById('travelerSearch');
+  if(search) search.value='';
+  const results=document.getElementById('travelerSearchResults');
+  if(results){ results.className='small muted'; results.textContent='Collaborator added. Their invite will be sent after the trip is saved.'; }
+  renderTravelers();
+}
 function openTripSheet(id){
   const t = id? getTrip(id):null;
   draftTravelers = t&&t.travelers? t.travelers.map(x=>({...x})) : [];
+  draftCollaborators=new Map();
+  travelerSearchRun++;
+  clearTimeout(travelerSearchTimer);
   openSheet(`<h2>${t?'Edit trip':'New trip'}</h2>
     <div class="field"><label>Trip name</label>
       <input id="f_name" placeholder="e.g. Bali Getaway" value="${t?esc(t.name):''}" maxlength="40"></div>
@@ -945,6 +1011,9 @@ function openTripSheet(id){
         <input id="f_end" type="date" value="${t&&t.endDate?t.endDate:''}"></div>
     </div>
     <div class="field"><label>Travelers (for splitting)</label><div id="f_travelers"></div></div>
+    <div class="field"><label>Add a collaborator</label>
+      <input id="travelerSearch" type="search" placeholder="Search by name" oninput="searchTripCollaborators(this.value)">
+      <div id="travelerSearchResults" class="small muted" style="margin-top:8px">Available users receive an invite after saving. If they aren't listed, add them by name as a traveler.</div></div>
     <button class="btn" onclick="saveTrip('${id||''}')">${t?'Save changes':'Create trip'}</button>
     ${t?`<button class="btn ghost" style="margin-top:10px" onclick="closeSheet()">Cancel</button>`:''}`);
   renderTravelers();
@@ -960,6 +1029,10 @@ async function saveTrip(id){
   if(!Number.isFinite(budget)||budget<0||budget>1000000000000){ toast('Enter a budget between 0 and 1,000,000,000,000'); return; }
   if(startDate && endDate && endDate<startDate){ toast('End date is before start'); return; }
   const travelers=draftTravelers.filter(tv=>tv.name.trim()).map(tv=>({id:tv.id,name:tv.name.trim()}));
+  const namedTravelerIds=new Set(travelers.map(traveler=>traveler.id));
+  const collaboratorUids=[...new Set([...draftCollaborators]
+    .filter(([travelerId])=>namedTravelerIds.has(travelerId))
+    .map(([,inviteeUid])=>inviteeUid))];
   let trip;
   if(id){
     const existing=getTrip(id); if(!existing){ closeSheet(); return; }
@@ -969,6 +1042,14 @@ async function saveTrip(id){
   }
   try{
     await Store.saveTrip(trip);
+    const inviteResults=await Promise.all(collaboratorUids.map(async inviteeUid=>{
+      try{
+        return await Store.sendCollaborationInvite(trip,inviteeUid,currentUser.displayName);
+      } catch(err){
+        console.error('Trip collaborator invite error:',err);
+        return {failed:true};
+      }
+    }));
     if(id) trips=trips.map(existing=>existing.id===id&&existing.ownerUid===trip.ownerUid?trip:existing);
     else{
       trips.push(trip);
@@ -976,7 +1057,9 @@ async function saveTrip(id){
       Store.saveSettings({activeTripId:trip.id}).catch(handleErr);
     }
     closeSheet();
-    toast(id?'Trip updated':'Trip created');
+    toast(inviteResults.some(result=>result.failed)
+      ? 'Trip saved, but a collaborator invite could not be sent'
+      : id?'Trip updated':'Trip created');
     render();
   } catch(err){
     handleErr(err);
@@ -1013,6 +1096,12 @@ function openExpSheet(id){
   const travelerIds=new Set(trav.map(v=>v.id));
   draftPart = e&&e.participants? [...new Set(e.participants.filter(id=>travelerIds.has(id)))]:trav.map(v=>v.id);
   const curCat = e?e.category:CATS[0].id;
+  const selectedCategory=allCats().find(category=>category.id===curCat);
+  const curSubCategory=e?.subCategory||'';
+  const subcategoryOptions=selectedCategory?.subcategories||[];
+  const subcategoryHtml=subcategoryOptions.length?`<div class="field"><label>Subcategory</label>
+    <select id="f_subcategory"><option value="">Choose a subcategory</option>${subcategoryOptions.map(option=>
+      `<option value="${esc(option.id)}" ${option.id===curSubCategory?'selected':''}>${esc(option.name)}</option>`).join('')}</select></div>`:'';
   const chips = allCats().map(c=>`<div class="chip ${c.id===curCat?'sel':''}" data-cat="${c.id}"
       onclick="pickCat(this)">${icon(c.ic)} ${esc(c.name)}</div>`).join('');
   const curMethod = e&&METHODS[e.method]?e.method:Object.keys(METHODS)[0];
@@ -1034,14 +1123,20 @@ function openExpSheet(id){
         <input id="f_amt" type="number" inputmode="decimal" min="0" max="1000000000000" step="any" placeholder="0.00" value="${curAmt}"></div>
       <div class="field"><label>Currency</label><div class="pill">${esc(currencyLabel())}</div></div>
     </div>
-    <div class="field"><label>Category</label><div class="chips" id="f_cats">${chips}</div>
+    <div class="field"><label>Category</label><div class="category-grid" id="f_cats">${chips}</div>
       <input type="hidden" id="f_cat" value="${curCat}"></div>
+    <div id="f_subcategory_wrap">${subcategoryHtml}</div>
     <div class="field"><label>Payment method</label><div class="chips" id="f_methods">${mchips}</div>
       <input type="hidden" id="f_method" value="${curMethod}"></div>
     <div class="field"><label>Note (optional)</label>
       <input id="f_note" placeholder="e.g. Lunch at beach cafe" value="${e?esc(e.note):''}" maxlength="60"></div>
-    <div class="field"><label>Date</label>
-      <input id="f_date" type="date" value="${e?e.date:todayISO()}" max="${todayISO()}"></div>
+    <div class="grid2">
+      <div class="field"><label>Date</label>
+        <input id="f_date" type="date" value="${e?e.date:todayISO()}" max="${todayISO()}"></div>
+      <div class="field"><label>Time</label>
+        <input id="f_time" type="time" value="${e?(e.time||''):currentTime()}"></div>
+    </div>
+    <button class="btn ghost sm" style="margin:-4px 0 14px" onclick="setExpenseNow()">${icon('fa-solid fa-clock')} Now</button>
     ${splitHtml}
     <div class="field"><label>Receipt</label><div id="f_photo"></div></div>
     <button class="btn" onclick="saveExp('${id||''}')">${e?'Save changes':'Add expense'}</button>
@@ -1050,7 +1145,20 @@ function openExpSheet(id){
   setTimeout(()=>{ const f=document.getElementById('f_amt'); if(f) f.focus(); },260);
 }
 function pickCat(el){ document.querySelectorAll('#f_cats .chip').forEach(c=>c.classList.remove('sel'));
-  el.classList.add('sel'); document.getElementById('f_cat').value=el.dataset.cat; }
+  el.classList.add('sel'); document.getElementById('f_cat').value=el.dataset.cat; renderSubcategories(); }
+function renderSubcategories(){
+  const category=allCats().find(item=>item.id===document.getElementById('f_cat')?.value);
+  const options=category?.subcategories||[];
+  const box=document.getElementById('f_subcategory_wrap');
+  if(!box) return;
+  box.innerHTML=options.length?`<div class="field"><label>Subcategory</label><select id="f_subcategory">
+    <option value="">Choose a subcategory</option>${options.map(option=>
+      `<option value="${esc(option.id)}">${esc(option.name)}</option>`).join('')}</select></div>`:'';
+}
+function setExpenseNow(){
+  document.getElementById('f_date').value=todayISO();
+  document.getElementById('f_time').value=currentTime();
+}
 function pickMethod(el){ document.querySelectorAll('#f_methods .chip').forEach(c=>c.classList.remove('sel'));
   el.classList.add('sel'); document.getElementById('f_method').value=el.dataset.m; }
 function pickPaidBy(el){ document.querySelectorAll('#f_paid .chip').forEach(c=>c.classList.remove('sel'));
@@ -1064,9 +1172,15 @@ async function saveExp(id){
   const method=document.getElementById('f_method').value;
   const note=document.getElementById('f_note').value.trim();
   const date=document.getElementById('f_date').value||todayISO();
+  const time=document.getElementById('f_time').value;
+  const subCategory=document.getElementById('f_subcategory')?.value||'';
   if(!Number.isFinite(raw)||raw<=0||raw>1000000000000){ toast('Enter an amount greater than 0 and at most 1,000,000,000,000'); return; }
   if(date>todayISO()){ toast('Expense date cannot be in the future'); return; }
+  if(time&&!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(time)){ toast('Enter a valid time'); return; }
+  if(time&&new Date(`${date}T${time}`)>new Date()){ toast('Expense time cannot be in the future'); return; }
   const rec={ownerUid:t.ownerUid,amount:raw, category:cat, method, note, date, photo:draftPhoto||null};
+  if(time) rec.time=time;
+  if(subCategory) rec.subCategory=subCategory;
   if((t.travelers||[]).length){
     if(!draftPart.length){ toast('Select at least one traveler for the split'); return; }
     rec.paidBy=document.getElementById('f_paidv').value;
@@ -1076,6 +1190,8 @@ async function saveExp(id){
   if(id){
     const existing=expenses.find(x=>x.id===id); if(!existing){ closeSheet(); return; }
     expense={...existing,...rec};
+    if(!time) delete expense.time;
+    if(!subCategory) delete expense.subCategory;
   } else {
     expense={id:uid(),tripId:activeTripId,createdAt:Date.now(),...rec};
   }

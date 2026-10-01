@@ -1,6 +1,11 @@
 {
   "currencyCode": "INR",
   "currencySymbol": "₹",
+  "categoryIds": ["food", "transport", "stay", "activity", "shopping", "grocery", "health", "fees", "misc"],
+  "subcategoriesByCategory": {
+    "food": ["swiggy", "zomato", "other"],
+    "transport": ["car", "bus", "train", "boat"]
+  },
   "exchangeRates": {
     "USD": 1,
     "EUR": 1.08,
@@ -13,9 +18,9 @@
     "SGD": 0.74
   },
   "categories": [
-    { "id": "food", "name": "Food & Drink", "ic": "fa-solid fa-utensils", "c": "#f59e0b", "custom": false },
-    { "id": "transport", "name": "Transport", "ic": "fa-solid fa-taxi", "c": "#3b82f6", "custom": false },
-    { "id": "stay", "name": "Accommodation", "ic": "fa-solid fa-bed", "c": "#8b5cf6", "custom": false },
+    { "id": "food", "name": "Food & Drink", "ic": "fa-solid fa-utensils", "c": "#f59e0b", "custom": false, "subcategories": [{ "id": "swiggy", "name": "Swiggy" }, { "id": "zomato", "name": "Zomato" }, { "id": "other", "name": "Other" }] },
+    { "id": "transport", "name": "Transport", "ic": "fa-solid fa-taxi", "c": "#3b82f6", "custom": false, "subcategories": [{ "id": "car", "name": "Car" }, { "id": "bus", "name": "Bus" }, { "id": "train", "name": "Train" }, { "id": "boat", "name": "Boat" }] },
+    { "id": "stay", "name": "Hotel", "ic": "fa-solid fa-bed", "c": "#8b5cf6", "custom": false },
     { "id": "activity", "name": "Activities", "ic": "fa-solid fa-umbrella-beach", "c": "#ec4899", "custom": false },
     { "id": "shopping", "name": "Shopping", "ic": "fa-solid fa-bag-shopping", "c": "#14b8a6", "custom": false },
     { "id": "grocery", "name": "Groceries", "ic": "fa-solid fa-cart-shopping", "c": "#84cc16", "custom": false },
@@ -56,6 +61,7 @@
   "paymentMethods": {
     "card": { "name": "Card", "ic": "fa-solid fa-credit-card" },
     "cash": { "name": "Cash", "ic": "fa-solid fa-money-bill-wave" },
-    "other": { "name": "Other", "ic": "fa-solid fa-ellipsis" }
+    "other": { "name": "Other", "ic": "fa-solid fa-ellipsis" },
+    "upi": { "name": "UPI", "ic": "fa-solid fa-mobile-screen-button" }
   }
 }

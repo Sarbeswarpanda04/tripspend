@@ -113,6 +113,13 @@ function isConfiguredPaymentMethod(value) {
     value in get(appCatalogPath()).data.paymentMethods.keys();
 }
 
+function isConfiguredSubCategory(categoryId, subCategory) {
+  return subCategory is string &&
+    exists(appCatalogPath()) &&
+    categoryId in get(appCatalogPath()).data.subcategoriesByCategory &&
+    subCategory in get(appCatalogPath()).data.subcategoriesByCategory[categoryId];
+}
+
 function isTripMember(ownerUid, tripId) {
   return signedIn() &&
     exists(/databases/$(database)/documents/tripShares/$(ownerUid)/trips/$(tripId)/members/$(request.auth.uid));
@@ -251,7 +258,7 @@ function validExpense(data, ownerUid, expenseId) {
     ]) &&
     data.keys().hasOnly([
       'id', 'ownerUid', 'tripId', 'amount', 'category', 'method',
-      'note', 'date', 'createdAt', 'photo', 'paidBy', 'participants'
+      'note', 'date', 'createdAt', 'photo', 'paidBy', 'participants', 'subCategory', 'time'
     ]) &&
     data.id == expenseId &&
     validId(data.id) &&
@@ -268,6 +275,10 @@ function validExpense(data, ownerUid, expenseId) {
     data.note.size() <= 60 &&
     data.date is string &&
     data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+    (!('time' in data) ||
+      (data.time is string && data.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'))) &&
+    (!('subCategory' in data) || data.subCategory == null ||
+      isConfiguredSubCategory(data.category, data.subCategory)) &&
     data.createdAt is number &&
     data.createdAt > 0 &&
     data.createdAt <= 4102444800000 &&
